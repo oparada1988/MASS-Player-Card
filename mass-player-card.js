@@ -1,20 +1,22 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.3.0
+ * Version: 3.5.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
+ * - Remote / Nabu Casa URL resolution with entity_picture_local support
+ * - Automatic Queue Recovery on initial load & remote reconnects
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
  * - Show Media Labels: Toggle to show/hide text overlays on grid cover art
- * - Automated Track Queue Drawer (animates smoothly below controls, shows up to 5 tracks with scrollbar, 100% hidden when idle)
+ * - Automated Track Queue Drawer (with 28px album art thumbnails, smooth accordion animation)
  * - Compact Media Player (Album Art, Artist, Title, Seekbar, Controls)
  * - Auto-Discovered 3-Column Grid directly from Music Assistant
  * - 1-Tap Playback with dynamic service routing
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.4.0";
+const MASS_CARD_VERSION = "3.5.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -195,6 +197,7 @@ class MassPlayerCard extends HTMLElement {
     this._currentSpeaker = null;
     this._currentGridContent = null;
     this._activePlaylistId = null;
+    this._fetchingQueue = false;
   }
 
   static async getConfigElement() {
@@ -227,6 +230,7 @@ class MassPlayerCard extends HTMLElement {
       this._currentSpeaker = speaker;
       this._currentGridContent = gridContent;
       this._loaded = false;
+      this._queueTracks = [];
     }
 
     this._config = {
@@ -250,7 +254,23 @@ class MassPlayerCard extends HTMLElement {
       this.loadPlaylists();
     }
     const stateObj = hass.states[this._config.speaker_entity];
+
+    // Auto-detect and load queue on page load or remote reconnect if playing
+    const isPlaying = stateObj?.state === "playing";
+    if (isPlaying && (!this._queueTracks || this._queueTracks.length === 0) && !this._fetchingQueue) {
+      this._autoLoadCurrentQueue(stateObj);
+    }
+
     this.render(stateObj);
+  }
+
+  resolveImageUrl(url) {
+    if (!url) return null;
+    // If it's a relative HA proxy URL (like /api/media_player_proxy/...), resolve against active HA connection
+    if (url.startsWith("/") && this._hass && typeof this._hass.hassUrl === "function") {
+      return this._hass.hassUrl(url);
+    }
+    return url;
   }
 
   async loadPlaylists() {
@@ -264,7 +284,7 @@ class MassPlayerCard extends HTMLElement {
         name: item.title,
         media_id: item.media_content_id || item.title,
         media_content_type: item.media_content_type || (targetType === "favorites" ? "track" : "playlist"),
-        image: item.thumbnail || null
+        image: this.resolveImageUrl(item.thumbnail) || null
       }));
     };
 
@@ -367,7 +387,7 @@ class MassPlayerCard extends HTMLElement {
           duration: t.duration ? formatDuration(t.duration) : "",
           media_id: t.media_content_id || t.title,
           media_content_type: t.media_content_type || "track",
-          image: t.thumbnail || item.image || null
+          image: this.resolveImageUrl(t.thumbnail) || this.resolveImageUrl(item.image) || null
         }));
       } else {
         this._queueTracks = [{
@@ -376,7 +396,7 @@ class MassPlayerCard extends HTMLElement {
           duration: "",
           media_id: item.media_id,
           media_content_type: item.media_content_type || "playlist",
-          image: item.image || null
+          image: this.resolveImageUrl(item.image) || null
         }];
       }
     } catch (e) {
@@ -385,7 +405,8 @@ class MassPlayerCard extends HTMLElement {
         artist: "",
         duration: "",
         media_id: item.media_id,
-        media_content_type: item.media_content_type || "playlist"
+        media_content_type: item.media_content_type || "playlist",
+        image: this.resolveImageUrl(item.image) || null
       }];
     }
 
@@ -393,11 +414,76 @@ class MassPlayerCard extends HTMLElement {
     this.render(stateObj);
   }
 
+  async _autoLoadCurrentQueue(stateObj) {
+    if (this._fetchingQueue || !stateObj) return;
+    this._fetchingQueue = true;
+    const attr = stateObj.attributes || {};
+    const speaker = this._config.speaker_entity;
+
+    try {
+      const album = (attr.media_album_name || "").toLowerCase().trim();
+      const plAttr = (attr.media_playlist || "").toLowerCase().trim();
+
+      let targetItem = null;
+      if (this._playlists && this._playlists.length > 0) {
+        targetItem = this._playlists.find(p => {
+          const n = (p.name || "").toLowerCase().trim();
+          return (album && album.includes(n)) || (plAttr && plAttr.includes(n));
+        });
+      }
+
+      if (targetItem) {
+        await this.loadQueueForPlaylist(targetItem);
+      } else if (speaker) {
+        const root = await this._hass.callWS({
+          type: "media_player/browse_media",
+          entity_id: speaker
+        });
+        if (root && root.children) {
+          const plFolder = root.children.find(c =>
+            (c.title || "").toLowerCase().includes("playlist") ||
+            (c.media_content_type || "").toLowerCase().includes("playlist")
+          );
+          if (plFolder) {
+            const plData = await this._hass.callWS({
+              type: "media_player/browse_media",
+              entity_id: speaker,
+              media_content_id: plFolder.media_content_id,
+              media_content_type: plFolder.media_content_type
+            });
+            if (plData && plData.children && plData.children.length > 0) {
+              const match = plData.children.find(p => {
+                const n = (p.title || "").toLowerCase().trim();
+                return (album && album.includes(n)) || (plAttr && plAttr.includes(n));
+              }) || plData.children[0];
+              if (match) {
+                await this.loadQueueForPlaylist({
+                  name: match.title,
+                  media_id: match.media_content_id,
+                  media_content_type: match.media_content_type,
+                  image: this.resolveImageUrl(match.thumbnail)
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[MASS-PLAYER-CARD] Could not auto-load queue on init:", e);
+    } finally {
+      this._fetchingQueue = false;
+    }
+  }
+
   render(state) {
     const attr = state?.attributes || {};
     const title = attr.media_title || (state?.state === "idle" ? "Idle" : "No Media Playing");
     const artist = attr.media_artist || (state?.state === "idle" ? "Music Assistant" : "");
-    const picture = attr.entity_picture ? attr.entity_picture : null;
+    
+    // Prefer locally proxied picture or resolve through hassUrl
+    let rawPicture = attr.entity_picture_local || attr.entity_picture || null;
+    const picture = this.resolveImageUrl(rawPicture);
+
     const isPlaying = state?.state === "playing";
 
     const duration = attr.media_duration || 0;
