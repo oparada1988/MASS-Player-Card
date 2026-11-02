@@ -1,7 +1,7 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.6.0
+ * Version: 3.6.1
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
@@ -16,7 +16,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.6.0";
+const MASS_CARD_VERSION = "3.6.1";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -276,27 +276,48 @@ class MassPlayerCard extends HTMLElement {
       const p = Object.values(this._hass.panels).find(panel => 
         (panel.url_path && (panel.url_path.includes("music_assistant") || panel.url_path.includes("mass")))
       );
-      if (p && p.url_path) slug = p.url_path;
+      if (p) {
+        slug = (p.config && p.config.ingress) || p.url_path || slug;
+      }
     }
 
     try {
-      const info = await this._hass.callWS({
-        type: "supervisor/ingress/info",
-        slug: slug
-      });
+      let info = null;
+      try {
+        info = await this._hass.callWS({
+          type: "hassio/ingress/info",
+          slug: slug
+        });
+      } catch (wsHassioErr) {
+        try {
+          info = await this._hass.callWS({
+            type: "supervisor/ingress/info",
+            slug: slug
+          });
+        } catch (wsSupErr) {}
+      }
+
       if (info && info.ingress_url) {
         this._ingressUrl = info.ingress_url.endsWith('/') ? info.ingress_url : info.ingress_url + '/';
+        
         try {
-          if (typeof this._hass.callApi === "function") {
-            await this._hass.callApi("POST", "hassio/ingress/session");
-          }
-        } catch (apiErr) {
+          await this._hass.callWS({
+            type: "hassio/ingress/session",
+            slug: slug
+          });
+        } catch (sessErr1) {
           try {
-            await this._hass.callWS({
-              type: "supervisor/ingress/session",
-              slug: slug
-            });
-          } catch (sessErr) {}
+            if (typeof this._hass.callApi === "function") {
+              await this._hass.callApi("POST", "hassio/ingress/session");
+            }
+          } catch (sessErr2) {
+            try {
+              await this._hass.callWS({
+                type: "supervisor/ingress/session",
+                slug: slug
+              });
+            } catch (sessErr3) {}
+          }
         }
 
         // Re-resolve existing items with the newly found Ingress URL
@@ -1147,10 +1168,10 @@ safeDefine("mass-player-card-editor", MassPlayerCardEditor);
 
 // Register Primary Card & Backward-Compatible Aliases
 safeDefine("mass-player-card", MassPlayerCard);
-safeDefine("mass-music-widget", MassPlayerCard);
-safeDefine("mass-playlist-card", MassPlayerCard);
-safeDefine("mass-playlist-widget", MassPlayerCard);
-safeDefine("mass-player-widget", MassPlayerCard);
+safeDefine("mass-music-widget", class extends MassPlayerCard {});
+safeDefine("mass-playlist-card", class extends MassPlayerCard {});
+safeDefine("mass-playlist-widget", class extends MassPlayerCard {});
+safeDefine("mass-player-widget", class extends MassPlayerCard {});
 
 // Register to Home Assistant's Visual Card Picker ("+ Add Card" modal)
 window.customCards = window.customCards || [];
