@@ -1,11 +1,11 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.5.0
+ * Version: 3.6.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
- * - Remote / Nabu Casa URL resolution with entity_picture_local support
+ * - Remote Nabu Casa Support: Automatic Ingress tunneling for Music Assistant imageproxy
  * - Automatic Queue Recovery on initial load & remote reconnects
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
  * - Show Media Labels: Toggle to show/hide text overlays on grid cover art
@@ -16,7 +16,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.5.0";
+const MASS_CARD_VERSION = "3.6.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -198,6 +198,8 @@ class MassPlayerCard extends HTMLElement {
     this._currentGridContent = null;
     this._activePlaylistId = null;
     this._fetchingQueue = false;
+    this._ingressUrl = null;
+    this._ingressAttempted = false;
   }
 
   static async getConfigElement() {
@@ -264,16 +266,90 @@ class MassPlayerCard extends HTMLElement {
     this.render(stateObj);
   }
 
+  async initIngressSession() {
+    if (this._ingressUrl) return this._ingressUrl;
+    if (this._ingressAttempted && this._ingressUrl) return this._ingressUrl;
+    this._ingressAttempted = true;
+
+    let slug = "d5369777_music_assistant";
+    if (this._hass && this._hass.panels) {
+      const p = Object.values(this._hass.panels).find(panel => 
+        (panel.url_path && (panel.url_path.includes("music_assistant") || panel.url_path.includes("mass")))
+      );
+      if (p && p.url_path) slug = p.url_path;
+    }
+
+    try {
+      const info = await this._hass.callWS({
+        type: "supervisor/ingress/info",
+        slug: slug
+      });
+      if (info && info.ingress_url) {
+        this._ingressUrl = info.ingress_url.endsWith('/') ? info.ingress_url : info.ingress_url + '/';
+        try {
+          if (typeof this._hass.callApi === "function") {
+            await this._hass.callApi("POST", "hassio/ingress/session");
+          }
+        } catch (apiErr) {
+          try {
+            await this._hass.callWS({
+              type: "supervisor/ingress/session",
+              slug: slug
+            });
+          } catch (sessErr) {}
+        }
+
+        // Re-resolve existing items with the newly found Ingress URL
+        if (this._playlists && this._playlists.length > 0) {
+          this._playlists = this._playlists.map(pl => ({
+            ...pl,
+            image: this.resolveImageUrl(pl.raw_thumbnail || pl.image)
+          }));
+        }
+        if (this._queueTracks && this._queueTracks.length > 0) {
+          this._queueTracks = this._queueTracks.map(t => ({
+            ...t,
+            image: this.resolveImageUrl(t.raw_thumbnail || t.image)
+          }));
+        }
+        const stateObj = this._hass?.states[this._config.speaker_entity];
+        this.render(stateObj);
+
+        return this._ingressUrl;
+      }
+    } catch (e) {
+      console.debug("[MASS-PLAYER-CARD] Ingress check:", e);
+    }
+    return null;
+  }
+
   resolveImageUrl(url) {
     if (!url) return null;
-    // If it's a relative HA proxy URL (like /api/media_player_proxy/...), resolve against active HA connection
-    if (url.startsWith("/") && this._hass && typeof this._hass.hassUrl === "function") {
-      return this._hass.hassUrl(url);
+    
+    // 1. Fix the known Music Assistant size=0 bug (which triggers 400 Bad Request)
+    let cleanUrl = url.replace(/([?&])size=0(&|$)/, '$1size=256$2');
+
+    // 2. Relative HA proxy URL (like /api/media_player_proxy/...)
+    if (cleanUrl.startsWith("/")) {
+      return this._hass && typeof this._hass.hassUrl === "function" ? this._hass.hassUrl(cleanUrl) : cleanUrl;
     }
-    return url;
+
+    // 3. Rewrite Music Assistant imageproxy URLs to the secure Ingress tunnel
+    if (cleanUrl.includes("imageproxy")) {
+      const idx = cleanUrl.indexOf("imageproxy");
+      const pathSuffix = cleanUrl.substring(idx);
+      if (this._ingressUrl) {
+        const fullPath = this._ingressUrl + pathSuffix;
+        return this._hass && typeof this._hass.hassUrl === "function" ? this._hass.hassUrl(fullPath) : fullPath;
+      }
+    }
+
+    return cleanUrl;
   }
 
   async loadPlaylists() {
+    await this.initIngressSession();
+
     let discovered = [];
     const speaker = this._config.speaker_entity;
     const targetType = this._config.grid_content || "playlists";
@@ -284,6 +360,7 @@ class MassPlayerCard extends HTMLElement {
         name: item.title,
         media_id: item.media_content_id || item.title,
         media_content_type: item.media_content_type || (targetType === "favorites" ? "track" : "playlist"),
+        raw_thumbnail: item.thumbnail || null,
         image: this.resolveImageUrl(item.thumbnail) || null
       }));
     };
@@ -340,6 +417,7 @@ class MassPlayerCard extends HTMLElement {
         );
         return {
           ...pl,
+          raw_thumbnail: match ? match.raw_thumbnail : null,
           image: match ? match.image : null,
           media_id: pl.media_id || (match ? match.media_id : pl.name)
         };
@@ -369,6 +447,7 @@ class MassPlayerCard extends HTMLElement {
 
   async loadQueueForPlaylist(item) {
     if (!item || !item.media_id) return;
+    await this.initIngressSession();
     this._activePlaylistId = item.media_id;
     const speaker = this._config.speaker_entity;
 
@@ -387,7 +466,8 @@ class MassPlayerCard extends HTMLElement {
           duration: t.duration ? formatDuration(t.duration) : "",
           media_id: t.media_content_id || t.title,
           media_content_type: t.media_content_type || "track",
-          image: this.resolveImageUrl(t.thumbnail) || this.resolveImageUrl(item.image) || null
+          raw_thumbnail: t.thumbnail || item.raw_thumbnail || item.image || null,
+          image: this.resolveImageUrl(t.thumbnail) || this.resolveImageUrl(item.raw_thumbnail || item.image) || null
         }));
       } else {
         this._queueTracks = [{
@@ -396,7 +476,8 @@ class MassPlayerCard extends HTMLElement {
           duration: "",
           media_id: item.media_id,
           media_content_type: item.media_content_type || "playlist",
-          image: this.resolveImageUrl(item.image) || null
+          raw_thumbnail: item.raw_thumbnail || item.image || null,
+          image: this.resolveImageUrl(item.raw_thumbnail || item.image) || null
         }];
       }
     } catch (e) {
@@ -406,7 +487,8 @@ class MassPlayerCard extends HTMLElement {
         duration: "",
         media_id: item.media_id,
         media_content_type: item.media_content_type || "playlist",
-        image: this.resolveImageUrl(item.image) || null
+        raw_thumbnail: item.raw_thumbnail || item.image || null,
+        image: this.resolveImageUrl(item.raw_thumbnail || item.image) || null
       }];
     }
 
@@ -417,6 +499,7 @@ class MassPlayerCard extends HTMLElement {
   async _autoLoadCurrentQueue(stateObj) {
     if (this._fetchingQueue || !stateObj) return;
     this._fetchingQueue = true;
+    await this.initIngressSession();
     const attr = stateObj.attributes || {};
     const speaker = this._config.speaker_entity;
 
@@ -461,6 +544,7 @@ class MassPlayerCard extends HTMLElement {
                   name: match.title,
                   media_id: match.media_content_id,
                   media_content_type: match.media_content_type,
+                  raw_thumbnail: match.thumbnail,
                   image: this.resolveImageUrl(match.thumbnail)
                 });
               }
@@ -537,14 +621,19 @@ class MassPlayerCard extends HTMLElement {
           border-radius: 12px;
           background-color: var(--secondary-background-color, rgba(255, 255, 255, 0.06));
           border: 1px solid var(--ha-card-border-color, var(--divider-color, rgba(255, 255, 255, 0.08)));
-          background-size: cover;
-          background-position: center;
-          background-repeat: no-repeat;
           display: flex;
           align-items: center;
           justify-content: center;
           overflow: hidden;
           color: var(--secondary-text-color, #9e9e9e);
+          position: relative;
+        }
+        .cover-art-img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          border-radius: 11px;
+          display: block;
         }
         .cover-art svg {
           width: 36px;
@@ -714,9 +803,6 @@ class MassPlayerCard extends HTMLElement {
           height: 28px;
           min-width: 28px;
           border-radius: 6px;
-          background-size: cover;
-          background-position: center;
-          background-repeat: no-repeat;
           background-color: var(--secondary-background-color, rgba(255, 255, 255, 0.08));
           display: flex;
           align-items: center;
@@ -724,6 +810,14 @@ class MassPlayerCard extends HTMLElement {
           overflow: hidden;
           color: var(--secondary-text-color, #9e9e9e);
           flex-shrink: 0;
+          position: relative;
+        }
+        .queue-thumb-img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          border-radius: 6px;
+          display: block;
         }
         .queue-thumb svg {
           width: 14px;
@@ -798,9 +892,6 @@ class MassPlayerCard extends HTMLElement {
           justify-content: flex-end;
           padding: 8px;
           box-sizing: border-box;
-          background-size: cover;
-          background-position: center;
-          background-repeat: no-repeat;
           cursor: pointer;
           position: relative;
           overflow: hidden;
@@ -814,15 +905,27 @@ class MassPlayerCard extends HTMLElement {
         .tile:active {
           transform: scale(0.96);
         }
+        .tile-img {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          border-radius: 11px;
+          display: block;
+          z-index: 1;
+        }
         .tile-icon {
           position: absolute;
-          top: 30%;
+          top: 35%;
           left: 50%;
           transform: translate(-50%, -50%);
           width: 32px;
           height: 32px;
           fill: var(--primary-color, #03a9f4);
-          opacity: 0.6;
+          opacity: 0.7;
+          z-index: 1;
         }
         .tile-title {
           font-size: 0.76rem;
@@ -838,14 +941,16 @@ class MassPlayerCard extends HTMLElement {
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
+          z-index: 2;
         }
       </style>
 
       <div class="unified-card">
         <!-- TOP: Player Section -->
         <div class="player-section">
-          <div class="cover-art" style="${picture ? `background-image: url('${picture}')` : ''}">
-            ${!picture ? `<svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>` : ''}
+          <div class="cover-art">
+            ${picture ? `<img class="cover-art-img" src="${picture}" alt="" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
+            <svg viewBox="0 0 24 24" style="${picture ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
           </div>
           <div class="info-col">
             <div class="artist">${artist}</div>
@@ -882,8 +987,9 @@ class MassPlayerCard extends HTMLElement {
                 <div class="queue-item ${isCurrent ? 'active-track' : ''}" data-track-idx="${idx}" title="Play ${t.name}">
                   <div class="queue-item-left">
                     <span class="queue-idx">${idx + 1}</span>
-                    <div class="queue-thumb" style="${t.image ? `background-image: url('${t.image}')` : ''}">
-                      ${!t.image ? `<svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>` : ''}
+                    <div class="queue-thumb">
+                      ${t.image ? `<img class="queue-thumb-img" src="${t.image}" alt="" loading="lazy" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
+                      <svg viewBox="0 0 24 24" style="${t.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
                     </div>
                     <div class="queue-track-meta">
                       <span class="queue-track-name">${t.name}</span>
@@ -903,9 +1009,10 @@ class MassPlayerCard extends HTMLElement {
         <!-- BOTTOM: Media Grid Section -->
         <div class="grid-container">
           ${playlists.map((pl, idx) => `
-            <div class="tile" data-index="${idx}" style="${pl.image ? `background-image: url('${pl.image}')` : ''}" title="${pl.name}">
-              ${!pl.image ? `<svg class="tile-icon" viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>` : ''}
-              ${(showLabels || !pl.image) ? `<div class="tile-title">${pl.name}</div>` : ''}
+            <div class="tile" data-index="${idx}" title="${pl.name}">
+              ${pl.image ? `<img class="tile-img" src="${pl.image}" alt="${pl.name}" loading="lazy" onerror="this.style.display='none'; const ic = this.parentElement.querySelector('.tile-icon'); if (ic) ic.style.display='block'; const ttl = this.parentElement.querySelector('.tile-title'); if (ttl) ttl.style.display='block';" />` : ''}
+              <svg class="tile-icon" viewBox="0 0 24 24" style="${pl.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+              ${showLabels ? `<div class="tile-title">${pl.name}</div>` : (pl.image ? `<div class="tile-title" style="display:none;">${pl.name}</div>` : `<div class="tile-title">${pl.name}</div>`)}
             </div>
           `).join('')}
         </div>
