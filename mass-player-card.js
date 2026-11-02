@@ -1,7 +1,7 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.6.1
+ * Version: 3.7.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
@@ -16,7 +16,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.6.1";
+const MASS_CARD_VERSION = "3.7.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -135,6 +135,12 @@ class MassPlayerCardEditor extends HTMLElement {
           selector: {
             boolean: {}
           }
+        },
+        {
+          name: "hide_played_queue",
+          selector: {
+            boolean: {}
+          }
         }
       ];
 
@@ -147,7 +153,8 @@ class MassPlayerCardEditor extends HTMLElement {
           show_player: "Show Media Player Widget",
           show_queue: "Auto-Show Track Queue (when playing)",
           show_playlists: "Show Media Grid",
-          show_labels: "Show Media Labels on Grid"
+          show_labels: "Show Media Labels on Grid",
+          hide_played_queue: "Clear Played Tracks from Queue"
         };
         return labels[schema.name] || schema.name;
       };
@@ -608,7 +615,35 @@ class MassPlayerCard extends HTMLElement {
     const cols = Number(this._config.columns) || 3;
     const maxHeight = this._config.max_height || '380px';
 
-    const queueTracks = this._queueTracks || [];
+    const hidePlayed = this._config.hide_played_queue !== false;
+    const rawQueue = this._queueTracks || [];
+
+    // Find currently playing track index in the queue
+    let currentTrackIdx = -1;
+    if (title) {
+      const curTitle = title.toLowerCase().trim();
+      currentTrackIdx = rawQueue.findIndex(t => {
+        const tName = (t.name || "").toLowerCase().trim();
+        return tName && (curTitle === tName || curTitle.includes(tName) || tName.includes(curTitle));
+      });
+    }
+
+    // Filter out already-played tracks if hidePlayed is enabled
+    let queueTracks = [];
+    if (hidePlayed && currentTrackIdx >= 0) {
+      queueTracks = rawQueue.slice(currentTrackIdx).map((t, idx) => ({
+        ...t,
+        original_idx: currentTrackIdx + idx + 1,
+        is_playing: idx === 0 && isPlaying
+      }));
+    } else {
+      queueTracks = rawQueue.map((t, idx) => ({
+        ...t,
+        original_idx: idx + 1,
+        is_playing: idx === currentTrackIdx && isPlaying
+      }));
+    }
+
     const isQueueOpen = showQueue && isPlaying && queueTracks.length > 0;
 
     this.shadowRoot.innerHTML = `
@@ -818,6 +853,30 @@ class MassPlayerCard extends HTMLElement {
           min-width: 16px;
           text-align: right;
           font-variant-numeric: tabular-nums;
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+        }
+        .playing-equalizer {
+          display: inline-flex;
+          align-items: flex-end;
+          gap: 2px;
+          height: 12px;
+          width: 13px;
+        }
+        .playing-equalizer span {
+          width: 2.5px;
+          background-color: var(--primary-color, #03a9f4);
+          border-radius: 1px;
+          animation: eqBounce 1s infinite ease-in-out;
+        }
+        .playing-equalizer span:nth-child(1) { height: 60%; animation-delay: 0s; }
+        .playing-equalizer span:nth-child(2) { height: 100%; animation-delay: 0.2s; }
+        .playing-equalizer span:nth-child(3) { height: 40%; animation-delay: 0.4s; }
+
+        @keyframes eqBounce {
+          0%, 100% { transform: scaleY(0.4); }
+          50% { transform: scaleY(1); }
         }
         .queue-thumb {
           width: 28px;
@@ -999,15 +1058,15 @@ class MassPlayerCard extends HTMLElement {
         <div class="queue-drawer ${isQueueOpen ? 'queue-open' : 'queue-closed'}">
           <div class="queue-header">
             <span class="queue-title">UPCOMING QUEUE</span>
-            <span class="queue-count">${queueTracks.length} tracks</span>
+            <span class="queue-count">${hidePlayed && currentTrackIdx >= 0 ? `${queueTracks.length} remaining • ${rawQueue.length} total` : `${queueTracks.length} tracks`}</span>
           </div>
           <div class="queue-list">
             ${queueTracks.map((t, idx) => {
-              const isCurrent = title && t.name && title.toLowerCase() === t.name.toLowerCase();
+              const isCurrent = t.is_playing;
               return `
                 <div class="queue-item ${isCurrent ? 'active-track' : ''}" data-track-idx="${idx}" title="Play ${t.name}">
                   <div class="queue-item-left">
-                    <span class="queue-idx">${idx + 1}</span>
+                    <span class="queue-idx">${t.is_playing ? `<span class="playing-equalizer"><span></span><span></span><span></span></span>` : t.original_idx}</span>
                     <div class="queue-thumb">
                       ${t.image ? `<img class="queue-thumb-img" src="${t.image}" alt="" loading="lazy" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
                       <svg viewBox="0 0 24 24" style="${t.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
@@ -1093,6 +1152,17 @@ class MassPlayerCard extends HTMLElement {
         const item = playlists[idx];
         this.playPlaylist(item);
       };
+    });
+
+    // Auto-scroll queue to ensure active playing track is always in view
+    requestAnimationFrame(() => {
+      const activeItem = this.shadowRoot.querySelector('.queue-item.active-track');
+      if (activeItem) {
+        activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } else {
+        const queueList = this.shadowRoot.querySelector('.queue-list');
+        if (queueList) queueList.scrollTop = 0;
+      }
     });
   }
 

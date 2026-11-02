@@ -70,6 +70,7 @@ show_labels: false       # Set false to show pure edge-to-edge album art without
 | `show_queue` | `boolean` | `true` | Automatically slides open the upcoming track queue drawer during playback (shows up to 5 tracks with scrollbar; completely hidden when idle). |
 | `show_playlists` | `boolean` | `true` | Toggle the media grid section on or off. |
 | `show_labels` | `boolean` | `true` | Toggle the text and gradient overlay on grid tiles. Turn off for clean, pure album artwork! |
+| `hide_played_queue` | `boolean` | `true` | Automatically clears already-played tracks from the Upcoming Queue and auto-scrolls to the active song. |
 | `max_height` | `string` | `380px` | Maximum height of the scrollable grid (e.g. `none`, `450px`, `380px`). |
 | `playlists` | `list` | `auto` | *(Optional)* Manually specify custom items if you wish to override auto-discovery. |
 
