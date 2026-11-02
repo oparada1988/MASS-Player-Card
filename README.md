@@ -55,6 +55,7 @@ limit: 12
 show_player: true
 show_queue: true         # Auto-shows 5-track scrollable queue drawer during playback
 show_playlists: true
+show_labels: false       # Set false to show pure edge-to-edge album art without text overlay
 ```
 
 #### Configuration Options
@@ -68,6 +69,7 @@ show_playlists: true
 | `show_player` | `boolean` | `true` | Toggle the media player header on or off. |
 | `show_queue` | `boolean` | `true` | Automatically slides open the upcoming track queue drawer during playback (shows up to 5 tracks with scrollbar; completely hidden when idle). |
 | `show_playlists` | `boolean` | `true` | Toggle the media grid section on or off. |
+| `show_labels` | `boolean` | `true` | Toggle the text and gradient overlay on grid tiles. Turn off for clean, pure album artwork! |
 | `max_height` | `string` | `380px` | Maximum height of the scrollable grid (e.g. `none`, `450px`, `380px`). |
 | `playlists` | `list` | `auto` | *(Optional)* Manually specify custom items if you wish to override auto-discovery. |
 

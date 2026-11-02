@@ -1,11 +1,12 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.2.0
+ * Version: 3.3.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
+ * - Show Media Labels: Toggle to show/hide text overlays on grid cover art
  * - Automated Track Queue Drawer (animates smoothly below controls, shows up to 5 tracks with scrollbar, 100% hidden when idle)
  * - Compact Media Player (Album Art, Artist, Title, Seekbar, Controls)
  * - Auto-Discovered 3-Column Grid directly from Music Assistant
@@ -13,7 +14,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.2.0";
+const MASS_CARD_VERSION = "3.3.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -126,6 +127,12 @@ class MassPlayerCardEditor extends HTMLElement {
           selector: {
             boolean: {}
           }
+        },
+        {
+          name: "show_labels",
+          selector: {
+            boolean: {}
+          }
         }
       ];
 
@@ -137,7 +144,8 @@ class MassPlayerCardEditor extends HTMLElement {
           limit: "Item Limit (0 = show all)",
           show_player: "Show Media Player Widget",
           show_queue: "Auto-Show Track Queue (when playing)",
-          show_playlists: "Show Media Grid"
+          show_playlists: "Show Media Grid",
+          show_labels: "Show Media Labels on Grid"
         };
         return labels[schema.name] || schema.name;
       };
@@ -167,6 +175,7 @@ class MassPlayerCardEditor extends HTMLElement {
       show_player: true,
       show_queue: true,
       show_playlists: true,
+      show_labels: true,
       limit: 0,
       ...this._config
     };
@@ -201,7 +210,8 @@ class MassPlayerCard extends HTMLElement {
       columns: 3,
       show_player: true,
       show_queue: true,
-      show_playlists: true
+      show_playlists: true,
+      show_labels: true
     };
   }
 
@@ -225,6 +235,7 @@ class MassPlayerCard extends HTMLElement {
       show_player: true,
       show_queue: true,
       show_playlists: true,
+      show_labels: true,
       limit: 0,
       ...config,
       speaker_entity: speaker,
@@ -358,7 +369,6 @@ class MassPlayerCard extends HTMLElement {
           media_content_type: t.media_content_type || "track"
         }));
       } else {
-        // Fallback: single item queue
         this._queueTracks = [{
           name: item.name,
           artist: "",
@@ -401,6 +411,7 @@ class MassPlayerCard extends HTMLElement {
     const showPlayer = this._config.show_player !== false;
     const showQueue = this._config.show_queue !== false;
     const showPlaylists = this._config.show_playlists !== false;
+    const showLabels = this._config.show_labels !== false;
     const cols = Number(this._config.columns) || 3;
     const maxHeight = this._config.max_height || '380px';
 
@@ -781,7 +792,7 @@ class MassPlayerCard extends HTMLElement {
           ${playlists.map((pl, idx) => `
             <div class="tile" data-index="${idx}" style="${pl.image ? `background-image: url('${pl.image}')` : ''}" title="${pl.name}">
               ${!pl.image ? `<svg class="tile-icon" viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>` : ''}
-              <div class="tile-title">${pl.name}</div>
+              ${(showLabels || !pl.image) ? `<div class="tile-title">${pl.name}</div>` : ''}
             </div>
           `).join('')}
         </div>
