@@ -14,7 +14,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.3.0";
+const MASS_CARD_VERSION = "3.4.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -366,7 +366,8 @@ class MassPlayerCard extends HTMLElement {
           artist: t.media_artist || "",
           duration: t.duration ? formatDuration(t.duration) : "",
           media_id: t.media_content_id || t.title,
-          media_content_type: t.media_content_type || "track"
+          media_content_type: t.media_content_type || "track",
+          image: t.thumbnail || item.image || null
         }));
       } else {
         this._queueTracks = [{
@@ -374,7 +375,8 @@ class MassPlayerCard extends HTMLElement {
           artist: "",
           duration: "",
           media_id: item.media_id,
-          media_content_type: item.media_content_type || "playlist"
+          media_content_type: item.media_content_type || "playlist",
+          image: item.image || null
         }];
       }
     } catch (e) {
@@ -621,6 +623,28 @@ class MassPlayerCard extends HTMLElement {
           text-align: right;
           font-variant-numeric: tabular-nums;
         }
+        .queue-thumb {
+          width: 28px;
+          height: 28px;
+          min-width: 28px;
+          border-radius: 6px;
+          background-size: cover;
+          background-position: center;
+          background-repeat: no-repeat;
+          background-color: var(--secondary-background-color, rgba(255, 255, 255, 0.08));
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          overflow: hidden;
+          color: var(--secondary-text-color, #9e9e9e);
+          flex-shrink: 0;
+        }
+        .queue-thumb svg {
+          width: 14px;
+          height: 14px;
+          fill: currentColor;
+          opacity: 0.7;
+        }
         .queue-track-meta {
           display: flex;
           flex-direction: column;
@@ -772,6 +796,9 @@ class MassPlayerCard extends HTMLElement {
                 <div class="queue-item ${isCurrent ? 'active-track' : ''}" data-track-idx="${idx}" title="Play ${t.name}">
                   <div class="queue-item-left">
                     <span class="queue-idx">${idx + 1}</span>
+                    <div class="queue-thumb" style="${t.image ? `background-image: url('${t.image}')` : ''}">
+                      ${!t.image ? `<svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>` : ''}
+                    </div>
                     <div class="queue-track-meta">
                       <span class="queue-track-name">${t.name}</span>
                       ${t.artist ? `<span class="queue-track-artist">${t.artist}</span>` : ''}
