@@ -1,24 +1,32 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.1.0
+ * Version: 3.2.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
+ * - Automated Track Queue Drawer (animates smoothly below controls, shows up to 5 tracks with scrollbar, 100% hidden when idle)
  * - Compact Media Player (Album Art, Artist, Title, Seekbar, Controls)
  * - Auto-Discovered 3-Column Grid directly from Music Assistant
  * - 1-Tap Playback with dynamic service routing
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.1.0";
+const MASS_CARD_VERSION = "3.2.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
   "color: white; background: #03a9f4; font-weight: 700; border-radius: 4px 0 0 4px; padding: 2px 6px;",
   "color: #03a9f4; background: #1c1c1e; font-weight: 700; border-radius: 0 4px 4px 0; padding: 2px 6px; border: 1px solid #03a9f4;"
 );
+
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return "";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
 
 /* ==========================================================================
    1. VISUAL CARD CONFIGURATION EDITOR (GUI)
@@ -108,6 +116,12 @@ class MassPlayerCardEditor extends HTMLElement {
           }
         },
         {
+          name: "show_queue",
+          selector: {
+            boolean: {}
+          }
+        },
+        {
           name: "show_playlists",
           selector: {
             boolean: {}
@@ -122,6 +136,7 @@ class MassPlayerCardEditor extends HTMLElement {
           columns: "Grid Columns (default: 3)",
           limit: "Item Limit (0 = show all)",
           show_player: "Show Media Player Widget",
+          show_queue: "Auto-Show Track Queue (when playing)",
           show_playlists: "Show Media Grid"
         };
         return labels[schema.name] || schema.name;
@@ -150,6 +165,7 @@ class MassPlayerCardEditor extends HTMLElement {
       grid_content: "playlists",
       columns: 3,
       show_player: true,
+      show_queue: true,
       show_playlists: true,
       limit: 0,
       ...this._config
@@ -165,9 +181,11 @@ class MassPlayerCard extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._playlists = [];
+    this._queueTracks = [];
     this._loaded = false;
     this._currentSpeaker = null;
     this._currentGridContent = null;
+    this._activePlaylistId = null;
   }
 
   static async getConfigElement() {
@@ -182,6 +200,7 @@ class MassPlayerCard extends HTMLElement {
       grid_content: "playlists",
       columns: 3,
       show_player: true,
+      show_queue: true,
       show_playlists: true
     };
   }
@@ -194,7 +213,6 @@ class MassPlayerCard extends HTMLElement {
     
     const gridContent = config.grid_content || "playlists";
 
-    // Reload if speaker entity or grid content mode changes
     if (this._currentSpeaker !== speaker || this._currentGridContent !== gridContent) {
       this._currentSpeaker = speaker;
       this._currentGridContent = gridContent;
@@ -205,6 +223,7 @@ class MassPlayerCard extends HTMLElement {
       grid_content: "playlists",
       columns: 3,
       show_player: true,
+      show_queue: true,
       show_playlists: true,
       limit: 0,
       ...config,
@@ -249,7 +268,6 @@ class MassPlayerCard extends HTMLElement {
           let folder = null;
 
           if (targetType === "favorites") {
-            // Find Favorites or Tracks (Liked Songs in Music Assistant)
             folder = root.children.find(c => {
               const t = (c.title || "").toLowerCase();
               const id = (c.media_content_id || "").toLowerCase();
@@ -260,7 +278,6 @@ class MassPlayerCard extends HTMLElement {
               return t.includes("track") || id.includes("track");
             });
           } else {
-            // Find Playlists folder
             folder = root.children.find(c => {
               const t = (c.title || "").toLowerCase();
               const id = (c.media_content_id || "").toLowerCase();
@@ -319,6 +336,51 @@ class MassPlayerCard extends HTMLElement {
     this.render(stateObj);
   }
 
+  async loadQueueForPlaylist(item) {
+    if (!item || !item.media_id) return;
+    this._activePlaylistId = item.media_id;
+    const speaker = this._config.speaker_entity;
+
+    try {
+      const data = await this._hass.callWS({
+        type: "media_player/browse_media",
+        entity_id: speaker,
+        media_content_id: item.media_id,
+        media_content_type: item.media_content_type || "playlist"
+      });
+
+      if (data && data.children && data.children.length > 0) {
+        this._queueTracks = data.children.map(t => ({
+          name: t.title,
+          artist: t.media_artist || "",
+          duration: t.duration ? formatDuration(t.duration) : "",
+          media_id: t.media_content_id || t.title,
+          media_content_type: t.media_content_type || "track"
+        }));
+      } else {
+        // Fallback: single item queue
+        this._queueTracks = [{
+          name: item.name,
+          artist: "",
+          duration: "",
+          media_id: item.media_id,
+          media_content_type: item.media_content_type || "playlist"
+        }];
+      }
+    } catch (e) {
+      this._queueTracks = [{
+        name: item.name,
+        artist: "",
+        duration: "",
+        media_id: item.media_id,
+        media_content_type: item.media_content_type || "playlist"
+      }];
+    }
+
+    const stateObj = this._hass?.states[this._config.speaker_entity];
+    this.render(stateObj);
+  }
+
   render(state) {
     const attr = state?.attributes || {};
     const title = attr.media_title || (state?.state === "idle" ? "Idle" : "No Media Playing");
@@ -337,9 +399,13 @@ class MassPlayerCard extends HTMLElement {
     const playlists = this._playlists;
 
     const showPlayer = this._config.show_player !== false;
+    const showQueue = this._config.show_queue !== false;
     const showPlaylists = this._config.show_playlists !== false;
     const cols = Number(this._config.columns) || 3;
     const maxHeight = this._config.max_height || '380px';
+
+    const queueTracks = this._queueTracks || [];
+    const isQueueOpen = showQueue && isPlaying && queueTracks.length > 0;
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -459,16 +525,129 @@ class MassPlayerCard extends HTMLElement {
           fill: currentColor;
         }
 
-        /* Subtle Separator Line */
+        /* 2. Track Queue Drawer (Smooth Accordion Animation) */
+        .queue-drawer {
+          max-height: 0;
+          opacity: 0;
+          overflow: hidden;
+          margin-top: 0;
+          margin-bottom: 0;
+          transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, margin 0.35s ease;
+        }
+        .queue-drawer.queue-open {
+          max-height: 205px;
+          opacity: 1;
+          margin-top: 12px;
+          margin-bottom: 4px;
+        }
+        .queue-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 0 4px 6px 4px;
+          font-size: 0.70rem;
+          font-weight: 700;
+          letter-spacing: 0.5px;
+          text-transform: uppercase;
+          color: var(--secondary-text-color, #a0a0a0);
+        }
+        .queue-count {
+          font-weight: 500;
+          opacity: 0.8;
+        }
+        .queue-list {
+          max-height: 175px;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          padding-right: 4px;
+        }
+        .queue-list::-webkit-scrollbar {
+          width: 5px;
+        }
+        .queue-list::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .queue-list::-webkit-scrollbar-thumb {
+          background-color: var(--secondary-text-color, rgba(255, 255, 255, 0.2));
+          border-radius: 10px;
+        }
+        .queue-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 6px 8px;
+          border-radius: 8px;
+          cursor: pointer;
+          transition: background-color 0.15s ease, color 0.15s ease;
+          gap: 8px;
+          min-height: 34px;
+          box-sizing: border-box;
+        }
+        .queue-item:hover {
+          background-color: var(--secondary-background-color, rgba(255, 255, 255, 0.08));
+        }
+        .queue-item.active-track {
+          background-color: rgba(3, 169, 244, 0.14);
+          border-left: 3px solid var(--primary-color, #03a9f4);
+        }
+        .queue-item.active-track .queue-track-name {
+          color: var(--primary-color, #03a9f4);
+          font-weight: 700;
+        }
+        .queue-item-left {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+          flex: 1;
+        }
+        .queue-idx {
+          font-size: 0.74rem;
+          color: var(--secondary-text-color, #8e8e93);
+          min-width: 16px;
+          text-align: right;
+          font-variant-numeric: tabular-nums;
+        }
+        .queue-track-meta {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          flex: 1;
+        }
+        .queue-track-name {
+          font-size: 0.80rem;
+          font-weight: 600;
+          color: var(--primary-text-color, #ffffff);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .queue-track-artist {
+          font-size: 0.70rem;
+          color: var(--secondary-text-color, #a0a0a0);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .queue-duration {
+          font-size: 0.72rem;
+          color: var(--secondary-text-color, #8e8e93);
+          font-variant-numeric: tabular-nums;
+          white-space: nowrap;
+        }
+
+        /* Subtle Separator Line (between player/queue and media grid) */
         .divider-line {
-          display: ${showPlayer && showPlaylists ? 'block' : 'none'};
+          display: ${(showPlayer || isQueueOpen) && showPlaylists ? 'block' : 'none'};
           height: 1px;
           background: var(--ha-card-border-color, var(--divider-color, rgba(255, 255, 255, 0.08)));
           margin: 14px 2px 14px 2px;
           opacity: 0.8;
         }
 
-        /* 2. Media Grid Section */
+        /* 3. Media Grid Section */
         .grid-container {
           display: ${showPlaylists ? 'grid' : 'none'};
           grid-template-columns: repeat(${cols}, 1fr);
@@ -569,6 +748,31 @@ class MassPlayerCard extends HTMLElement {
           </div>
         </div>
 
+        <!-- MIDDLE: Track Queue Drawer (Smooth Accordion Effect) -->
+        <div class="queue-drawer ${isQueueOpen ? 'queue-open' : 'queue-closed'}">
+          <div class="queue-header">
+            <span class="queue-title">UPCOMING QUEUE</span>
+            <span class="queue-count">${queueTracks.length} tracks</span>
+          </div>
+          <div class="queue-list">
+            ${queueTracks.map((t, idx) => {
+              const isCurrent = title && t.name && title.toLowerCase() === t.name.toLowerCase();
+              return `
+                <div class="queue-item ${isCurrent ? 'active-track' : ''}" data-track-idx="${idx}" title="Play ${t.name}">
+                  <div class="queue-item-left">
+                    <span class="queue-idx">${idx + 1}</span>
+                    <div class="queue-track-meta">
+                      <span class="queue-track-name">${t.name}</span>
+                      ${t.artist ? `<span class="queue-track-artist">${t.artist}</span>` : ''}
+                    </div>
+                  </div>
+                  ${t.duration ? `<span class="queue-duration">${t.duration}</span>` : ''}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+
         <!-- SUBTLE SEPARATOR LINE -->
         <div class="divider-line"></div>
 
@@ -619,6 +823,17 @@ class MassPlayerCard extends HTMLElement {
       }
     }
 
+    // Queue item click events (tap to play track)
+    this.shadowRoot.querySelectorAll('.queue-item').forEach(itemEl => {
+      itemEl.onclick = () => {
+        const trackIdx = parseInt(itemEl.getAttribute('data-track-idx'), 10);
+        const track = queueTracks[trackIdx];
+        if (track) {
+          this.playTrack(track);
+        }
+      };
+    });
+
     // Grid tile click events
     this.shadowRoot.querySelectorAll('.tile').forEach(tile => {
       tile.onclick = () => {
@@ -636,6 +851,9 @@ class MassPlayerCard extends HTMLElement {
 
     console.log(`[MASS-PLAYER-CARD v${MASS_CARD_VERSION}] Playing ${mediaType} on ${speaker}:`, item);
 
+    // Auto-fetch upcoming queue for this playlist
+    this.loadQueueForPlaylist(item);
+
     const hasMusicAssistantAction = this._hass.services &&
       this._hass.services.music_assistant &&
       this._hass.services.music_assistant.play_media;
@@ -649,6 +867,27 @@ class MassPlayerCard extends HTMLElement {
       this._hass.callService("media_player", "play_media", {
         media_content_type: mediaType,
         media_content_id: item.media_id || item.name,
+      }, { entity_id: speaker });
+    }
+  }
+
+  playTrack(track) {
+    const speaker = this._config.speaker_entity;
+    console.log(`[MASS-PLAYER-CARD v${MASS_CARD_VERSION}] Playing queue track on ${speaker}:`, track);
+
+    const hasMusicAssistantAction = this._hass.services &&
+      this._hass.services.music_assistant &&
+      this._hass.services.music_assistant.play_media;
+
+    if (hasMusicAssistantAction) {
+      this._hass.callService("music_assistant", "play_media", {
+        media_type: track.media_content_type || "track",
+        media_id: track.media_id || track.name,
+      }, { entity_id: speaker });
+    } else {
+      this._hass.callService("media_player", "play_media", {
+        media_content_type: track.media_content_type || "music",
+        media_content_id: track.media_id || track.name,
       }, { entity_id: speaker });
     }
   }

@@ -53,6 +53,7 @@ grid_content: playlists  # Options: playlists or favorites
 columns: 3
 limit: 12
 show_player: true
+show_queue: true         # Auto-shows 5-track scrollable queue drawer during playback
 show_playlists: true
 ```
 
@@ -65,6 +66,7 @@ show_playlists: true
 | `columns` | `number` | `3` | Number of columns in the media grid (1 to 6). |
 | `limit` | `number` | `0` (all) | Maximum number of items to display. Set to `0` or omit to display all. |
 | `show_player` | `boolean` | `true` | Toggle the media player header on or off. |
+| `show_queue` | `boolean` | `true` | Automatically slides open the upcoming track queue drawer during playback (shows up to 5 tracks with scrollbar; completely hidden when idle). |
 | `show_playlists` | `boolean` | `true` | Toggle the media grid section on or off. |
 | `max_height` | `string` | `380px` | Maximum height of the scrollable grid (e.g. `none`, `450px`, `380px`). |
 | `playlists` | `list` | `auto` | *(Optional)* Manually specify custom items if you wish to override auto-discovery. |
