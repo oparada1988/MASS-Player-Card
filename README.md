@@ -67,6 +67,7 @@ show_labels: false       # Set false to show pure edge-to-edge album art without
 | `columns` | `number` | `3` | Number of columns in the media grid (1 to 6). |
 | `limit` | `number` | `0` (all) | Maximum number of items to display. Set to `0` or omit to display all. |
 | `show_player` | `boolean` | `true` | Toggle the media player header on or off. |
+| `show_volume` | `boolean` | `true` | Toggle the interactive volume slider and mute control on or off. |
 | `show_queue` | `boolean` | `true` | Automatically slides open the upcoming track queue drawer during playback (shows up to 5 tracks with scrollbar; completely hidden when idle). |
 | `show_playlists` | `boolean` | `true` | Toggle the media grid section on or off. |
 | `show_labels` | `boolean` | `true` | Toggle the text and gradient overlay on grid tiles. Turn off for clean, pure album artwork! |

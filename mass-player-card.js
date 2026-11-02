@@ -1,7 +1,7 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.7.0
+ * Version: 3.8.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
@@ -16,7 +16,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.7.0";
+const MASS_CARD_VERSION = "3.8.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -119,6 +119,12 @@ class MassPlayerCardEditor extends HTMLElement {
           }
         },
         {
+          name: "show_volume",
+          selector: {
+            boolean: {}
+          }
+        },
+        {
           name: "show_queue",
           selector: {
             boolean: {}
@@ -151,6 +157,7 @@ class MassPlayerCardEditor extends HTMLElement {
           columns: "Grid Columns (default: 3)",
           limit: "Item Limit (0 = show all)",
           show_player: "Show Media Player Widget",
+          show_volume: "Show Volume Slider",
           show_queue: "Auto-Show Track Queue (when playing)",
           show_playlists: "Show Media Grid",
           show_labels: "Show Media Labels on Grid",
@@ -207,6 +214,7 @@ class MassPlayerCard extends HTMLElement {
     this._fetchingQueue = false;
     this._ingressUrl = null;
     this._ingressAttempted = false;
+    this._lastScrolledTrackKey = null;
   }
 
   static async getConfigElement() {
@@ -588,6 +596,10 @@ class MassPlayerCard extends HTMLElement {
   }
 
   render(state) {
+    // Preserve scroll position across 1-second state ticks
+    const prevQueueList = this.shadowRoot.querySelector('.queue-list');
+    const prevScrollTop = prevQueueList ? prevQueueList.scrollTop : 0;
+
     const attr = state?.attributes || {};
     const title = attr.media_title || (state?.state === "idle" ? "Idle" : "No Media Playing");
     const artist = attr.media_artist || (state?.state === "idle" ? "Music Assistant" : "");
@@ -609,11 +621,27 @@ class MassPlayerCard extends HTMLElement {
     const playlists = this._playlists;
 
     const showPlayer = this._config.show_player !== false;
+    const showVolume = this._config.show_volume !== false;
     const showQueue = this._config.show_queue !== false;
     const showPlaylists = this._config.show_playlists !== false;
     const showLabels = this._config.show_labels !== false;
     const cols = Number(this._config.columns) || 3;
     const maxHeight = this._config.max_height || '380px';
+
+    // Volume details
+    const vol = typeof attr.volume_level === 'number' ? attr.volume_level : 0.5;
+    const isMuted = attr.is_volume_muted === true;
+    const volPercent = Math.round(vol * 100);
+
+    // Playback mode (Normal, Repeat, Shuffle)
+    const isShuffle = attr.shuffle === true;
+    const repeatMode = attr.repeat || "off";
+    let currentMode = "normal";
+    if (isShuffle) {
+      currentMode = "shuffle";
+    } else if (repeatMode === "all" || repeatMode === "one") {
+      currentMode = "repeat";
+    }
 
     const hidePlayed = this._config.hide_played_queue !== false;
     const rawQueue = this._queueTracks || [];
@@ -737,11 +765,94 @@ class MassPlayerCard extends HTMLElement {
           width: ${progressPercent}%;
           transition: width 0.3s linear;
         }
+        /* Time Row (under seekbar) */
+        .time-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          font-size: 0.68rem;
+          font-weight: 500;
+          color: var(--secondary-text-color, #8e8e93);
+          font-variant-numeric: tabular-nums;
+          margin-top: 2px;
+          margin-bottom: 2px;
+          padding: 0 1px;
+        }
+
+        /* Controls Row */
         .controls {
           display: flex;
           align-items: center;
-          justify-content: space-around;
-          margin-top: 2px;
+          justify-content: space-between;
+          margin-top: 4px;
+          padding: 0 4px;
+        }
+        .center-controls {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+
+        /* Volume Row */
+        .volume-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-top: 6px;
+          padding: 0 4px;
+        }
+        .vol-btn {
+          background: none;
+          border: none;
+          color: var(--secondary-text-color, #a0a0a0);
+          cursor: pointer;
+          padding: 2px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: color 0.2s, transform 0.1s;
+        }
+        .vol-btn:hover {
+          color: var(--primary-color, #03a9f4);
+          transform: scale(1.1);
+        }
+        .vol-btn svg {
+          width: 18px;
+          height: 18px;
+          fill: currentColor;
+        }
+        .volume-slider-container {
+          flex: 1;
+          height: 5px;
+          background-color: var(--secondary-background-color, rgba(255, 255, 255, 0.12));
+          border-radius: 3px;
+          cursor: pointer;
+          position: relative;
+        }
+        .volume-slider-fill {
+          height: 100%;
+          background-color: var(--secondary-text-color, #a0a0a0);
+          border-radius: 3px;
+          transition: width 0.1s ease, background-color 0.2s;
+        }
+        .volume-slider-container:hover .volume-slider-fill {
+          background-color: var(--primary-color, #03a9f4);
+        }
+        .volume-pct {
+          font-size: 0.68rem;
+          color: var(--secondary-text-color, #8e8e93);
+          font-variant-numeric: tabular-nums;
+          min-width: 28px;
+          text-align: right;
+        }
+
+        /* Playback Mode Button */
+        .mode-btn {
+          color: var(--secondary-text-color, #8e8e93);
+          position: relative;
+        }
+        .mode-btn.mode-active {
+          color: var(--primary-color, #03a9f4);
         }
         .ctrl-btn {
           background: none;
@@ -1038,18 +1149,49 @@ class MassPlayerCard extends HTMLElement {
             <div class="progress-bar-container" id="progressBar">
               <div class="progress-bar-fill"></div>
             </div>
+            <div class="time-row">
+              <span class="time-elapsed">${formatDuration(currentPos)}</span>
+              <span class="time-total">${duration > 0 ? formatDuration(duration) : '0:00'}</span>
+            </div>
             <div class="controls">
-              <button class="ctrl-btn" id="prevBtn" title="Previous">
-                <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+              <button class="ctrl-btn mode-btn ${currentMode !== 'normal' ? 'mode-active' : ''}" id="modeBtn" title="Mode: ${currentMode === 'normal' ? 'Normal (tap for Repeat)' : currentMode === 'repeat' ? 'Repeat (tap for Shuffle)' : 'Shuffle (tap for Normal)'}">
+                ${currentMode === 'normal' 
+                  ? `<svg viewBox="0 0 24 24"><path d="M14 6H2v2h12V6zm0 4H2v2h12v-2zM2 16h8v-2H2v2zm19-4.5L16.5 7v3.5H12v2h4.5V16L21 11.5z"/></svg>`
+                  : currentMode === 'repeat'
+                  ? `<svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>`
+                  : `<svg viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>`
+                }
               </button>
-              <button class="ctrl-btn" id="playPauseBtn" title="${isPlaying ? 'Pause' : 'Play'}">
-                ${isPlaying 
-                  ? `<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>` 
-                  : `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>`}
+              <div class="center-controls">
+                <button class="ctrl-btn" id="prevBtn" title="Previous">
+                  <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+                </button>
+                <button class="ctrl-btn" id="playPauseBtn" title="${isPlaying ? 'Pause' : 'Play'}">
+                  ${isPlaying 
+                    ? `<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>` 
+                    : `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>`}
+                </button>
+                <button class="ctrl-btn" id="nextBtn" title="Next">
+                  <svg viewBox="0 0 24 24"><path d="m6 18 8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+                </button>
+              </div>
+              <div style="width: 32px;"></div>
+            </div>
+
+            <!-- Volume Slider Row -->
+            <div class="volume-row" style="${showVolume ? 'display: flex;' : 'display: none;'}">
+              <button class="vol-btn" id="muteBtn" title="${isMuted ? 'Unmute' : 'Mute'}">
+                ${isMuted || vol === 0
+                  ? `<svg viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"/></svg>`
+                  : vol < 0.5
+                  ? `<svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 5V4L9 9H5zm11 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>`
+                  : `<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L9 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>`
+                }
               </button>
-              <button class="ctrl-btn" id="nextBtn" title="Next">
-                <svg viewBox="0 0 24 24"><path d="m6 18 8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-              </button>
+              <div class="volume-slider-container" id="volumeBar">
+                <div class="volume-slider-fill" style="width: ${isMuted ? 0 : volPercent}%;"></div>
+              </div>
+              <span class="volume-pct">${isMuted ? 'Muted' : `${volPercent}%`}</span>
             </div>
           </div>
         </div>
@@ -1154,14 +1296,61 @@ class MassPlayerCard extends HTMLElement {
       };
     });
 
-    // Auto-scroll queue to ensure active playing track is always in view
+    // 3-State Mode Button (Normal -> Repeat -> Shuffle -> Normal)
+    const modeBtn = this.shadowRoot.getElementById('modeBtn');
+    if (modeBtn) {
+      modeBtn.onclick = () => {
+        const speaker = this._config.speaker_entity;
+        if (currentMode === 'normal') {
+          this._hass.callService("media_player", "repeat_set", { entity_id: speaker, repeat: "all" });
+          this._hass.callService("media_player", "shuffle_set", { entity_id: speaker, shuffle: false });
+        } else if (currentMode === 'repeat') {
+          this._hass.callService("media_player", "repeat_set", { entity_id: speaker, repeat: "off" });
+          this._hass.callService("media_player", "shuffle_set", { entity_id: speaker, shuffle: true });
+        } else {
+          this._hass.callService("media_player", "repeat_set", { entity_id: speaker, repeat: "off" });
+          this._hass.callService("media_player", "shuffle_set", { entity_id: speaker, shuffle: false });
+        }
+      };
+    }
+
+    // Mute toggle
+    const muteBtn = this.shadowRoot.getElementById('muteBtn');
+    if (muteBtn) {
+      muteBtn.onclick = () => {
+        this._hass.callService("media_player", "volume_mute", {
+          entity_id: this._config.speaker_entity,
+          is_volume_muted: !isMuted
+        });
+      };
+    }
+
+    // Volume seekbar
+    const volumeBar = this.shadowRoot.getElementById('volumeBar');
+    if (volumeBar) {
+      volumeBar.onclick = (e) => {
+        const rect = volumeBar.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        this._hass.callService("media_player", "volume_set", {
+          entity_id: this._config.speaker_entity,
+          volume_level: ratio
+        });
+      };
+    }
+
+    // Gated Auto-Scroll: only reset to top when track actually advances; otherwise preserve user scroll position!
+    const trackKey = `${title}-${currentTrackIdx}`;
+    const isTrackChanged = this._lastScrolledTrackKey !== trackKey;
+
     requestAnimationFrame(() => {
-      const activeItem = this.shadowRoot.querySelector('.queue-item.active-track');
-      if (activeItem) {
-        activeItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      } else {
-        const queueList = this.shadowRoot.querySelector('.queue-list');
-        if (queueList) queueList.scrollTop = 0;
+      const queueList = this.shadowRoot.querySelector('.queue-list');
+      if (queueList) {
+        if (isTrackChanged) {
+          this._lastScrolledTrackKey = trackKey;
+          queueList.scrollTo({ top: 0, behavior: 'smooth' });
+        } else {
+          queueList.scrollTop = prevScrollTop;
+        }
       }
     });
   }
