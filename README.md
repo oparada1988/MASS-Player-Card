@@ -49,6 +49,7 @@ A sleek, modern, all-in-one Lovelace card for **Home Assistant** and **Music Ass
 ```yaml
 type: custom:mass-player-card
 speaker_entity: media_player.home_speaker_group
+grid_content: playlists  # Options: playlists or favorites
 columns: 3
 limit: 12
 show_player: true
@@ -60,12 +61,13 @@ show_playlists: true
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `speaker_entity` | `string` | **Required** | The entity ID of the target speaker or speaker group (e.g., `media_player.home_speaker_group`). |
-| `columns` | `number` | `3` | Number of columns in the playlist grid (1 to 6). |
-| `limit` | `number` | `0` (all) | Maximum number of playlists to display. Set to `0` or omit to display all. |
+| `grid_content` | `string` | `playlists` | Single-choice selection: `playlists` or `favorites`. Determines what is automatically displayed on the grid. |
+| `columns` | `number` | `3` | Number of columns in the media grid (1 to 6). |
+| `limit` | `number` | `0` (all) | Maximum number of items to display. Set to `0` or omit to display all. |
 | `show_player` | `boolean` | `true` | Toggle the media player header on or off. |
-| `show_playlists` | `boolean` | `true` | Toggle the playlist grid section on or off. |
+| `show_playlists` | `boolean` | `true` | Toggle the media grid section on or off. |
 | `max_height` | `string` | `380px` | Maximum height of the scrollable grid (e.g. `none`, `450px`, `380px`). |
-| `playlists` | `list` | `auto` | *(Optional)* Manually specify custom playlists if you wish to override auto-discovery. |
+| `playlists` | `list` | `auto` | *(Optional)* Manually specify custom items if you wish to override auto-discovery. |
 
 ---
 

@@ -1,17 +1,18 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.0.0
+ * Version: 3.1.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
+ * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
  * - Compact Media Player (Album Art, Artist, Title, Seekbar, Controls)
- * - Auto-Discovered 3-Column Playlist Grid directly from Music Assistant
+ * - Auto-Discovered 3-Column Grid directly from Music Assistant
  * - 1-Tap Playback with dynamic service routing
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.0.0";
+const MASS_CARD_VERSION = "3.1.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -67,6 +68,18 @@ class MassPlayerCardEditor extends HTMLElement {
           }
         },
         {
+          name: "grid_content",
+          selector: {
+            select: {
+              options: [
+                { value: "playlists", label: "Playlists" },
+                { value: "favorites", label: "Favorites" }
+              ],
+              mode: "dropdown"
+            }
+          }
+        },
+        {
           name: "columns",
           selector: {
             number: {
@@ -105,10 +118,11 @@ class MassPlayerCardEditor extends HTMLElement {
       form.computeLabel = (schema) => {
         const labels = {
           speaker_entity: "Media Player Entity",
+          grid_content: "On the grid show",
           columns: "Grid Columns (default: 3)",
-          limit: "Playlist Limit (0 = show all)",
+          limit: "Item Limit (0 = show all)",
           show_player: "Show Media Player Widget",
-          show_playlists: "Show Playlist Grid"
+          show_playlists: "Show Media Grid"
         };
         return labels[schema.name] || schema.name;
       };
@@ -133,6 +147,7 @@ class MassPlayerCardEditor extends HTMLElement {
 
     form.hass = this._hass;
     form.data = {
+      grid_content: "playlists",
       columns: 3,
       show_player: true,
       show_playlists: true,
@@ -152,6 +167,7 @@ class MassPlayerCard extends HTMLElement {
     this._playlists = [];
     this._loaded = false;
     this._currentSpeaker = null;
+    this._currentGridContent = null;
   }
 
   static async getConfigElement() {
@@ -163,6 +179,7 @@ class MassPlayerCard extends HTMLElement {
     const preferred = mediaPlayers.find(eid => eid.includes("speaker_group") || eid.includes("mass")) || mediaPlayers[0] || "";
     return {
       speaker_entity: preferred,
+      grid_content: "playlists",
       columns: 3,
       show_player: true,
       show_playlists: true
@@ -175,13 +192,17 @@ class MassPlayerCard extends HTMLElement {
       throw new Error("Please specify 'speaker_entity' (e.g. media_player.home_speaker_group)");
     }
     
-    // Check if speaker entity changed
-    if (this._currentSpeaker !== speaker) {
+    const gridContent = config.grid_content || "playlists";
+
+    // Reload if speaker entity or grid content mode changes
+    if (this._currentSpeaker !== speaker || this._currentGridContent !== gridContent) {
       this._currentSpeaker = speaker;
+      this._currentGridContent = gridContent;
       this._loaded = false;
     }
 
     this._config = {
+      grid_content: "playlists",
       columns: 3,
       show_player: true,
       show_playlists: true,
@@ -205,13 +226,14 @@ class MassPlayerCard extends HTMLElement {
   async loadPlaylists() {
     let discovered = [];
     const speaker = this._config.speaker_entity;
+    const targetType = this._config.grid_content || "playlists";
 
     const extractItems = (data) => {
       if (!data || !data.children) return [];
       return data.children.map(item => ({
         name: item.title,
         media_id: item.media_content_id || item.title,
-        media_content_type: item.media_content_type || "playlist",
+        media_content_type: item.media_content_type || (targetType === "favorites" ? "track" : "playlist"),
         image: item.thumbnail || null
       }));
     };
@@ -224,20 +246,37 @@ class MassPlayerCard extends HTMLElement {
         });
 
         if (root && root.children) {
-          const plFolder = root.children.find(c =>
-            (c.title || "").toLowerCase().includes("playlist") ||
-            (c.media_content_type || "").toLowerCase().includes("playlist") ||
-            (c.media_class || "").toLowerCase().includes("playlist")
-          );
+          let folder = null;
 
-          if (plFolder) {
-            const plData = await this._hass.callWS({
+          if (targetType === "favorites") {
+            // Find Favorites or Tracks (Liked Songs in Music Assistant)
+            folder = root.children.find(c => {
+              const t = (c.title || "").toLowerCase();
+              const id = (c.media_content_id || "").toLowerCase();
+              return t.includes("favorite") || id.includes("favorite") || t.includes("liked") || id.includes("liked");
+            }) || root.children.find(c => {
+              const t = (c.title || "").toLowerCase();
+              const id = (c.media_content_id || "").toLowerCase();
+              return t.includes("track") || id.includes("track");
+            });
+          } else {
+            // Find Playlists folder
+            folder = root.children.find(c => {
+              const t = (c.title || "").toLowerCase();
+              const id = (c.media_content_id || "").toLowerCase();
+              const mc = (c.media_class || "").toLowerCase();
+              return t.includes("playlist") || id.includes("playlist") || mc.includes("playlist");
+            });
+          }
+
+          if (folder) {
+            const mediaData = await this._hass.callWS({
               type: "media_player/browse_media",
               entity_id: speaker,
-              media_content_id: plFolder.media_content_id,
-              media_content_type: plFolder.media_content_type
+              media_content_id: folder.media_content_id,
+              media_content_type: folder.media_content_type
             });
-            discovered = extractItems(plData);
+            discovered = extractItems(mediaData);
           }
         }
       } catch (err) {
@@ -260,7 +299,9 @@ class MassPlayerCard extends HTMLElement {
     } else if (discovered.length > 0) {
       this._playlists = discovered;
     } else {
-      this._playlists = [
+      this._playlists = targetType === "favorites" ? [
+        { name: "Favorite Tracks", media_id: "tracks" }
+      ] : [
         { name: "All Out 80s", media_id: "All Out 80s" },
         { name: "Marvel83' Mix", media_id: "Marvel83' Mix" },
         { name: "Night Tapes Radio", media_id: "Night Tapes Radio" },
@@ -427,7 +468,7 @@ class MassPlayerCard extends HTMLElement {
           opacity: 0.8;
         }
 
-        /* 2. Playlist Grid Section */
+        /* 2. Media Grid Section */
         .grid-container {
           display: ${showPlaylists ? 'grid' : 'none'};
           grid-template-columns: repeat(${cols}, 1fr);
@@ -531,7 +572,7 @@ class MassPlayerCard extends HTMLElement {
         <!-- SUBTLE SEPARATOR LINE -->
         <div class="divider-line"></div>
 
-        <!-- BOTTOM: Playlist Grid Section -->
+        <!-- BOTTOM: Media Grid Section -->
         <div class="grid-container">
           ${playlists.map((pl, idx) => `
             <div class="tile" data-index="${idx}" style="${pl.image ? `background-image: url('${pl.image}')` : ''}" title="${pl.name}">
@@ -578,7 +619,7 @@ class MassPlayerCard extends HTMLElement {
       }
     }
 
-    // Playlist tile click events
+    // Grid tile click events
     this.shadowRoot.querySelectorAll('.tile').forEach(tile => {
       tile.onclick = () => {
         const idx = parseInt(tile.getAttribute('data-index'), 10);
@@ -590,7 +631,10 @@ class MassPlayerCard extends HTMLElement {
 
   playPlaylist(item) {
     const speaker = this._config.speaker_entity;
-    console.log(`[MASS-PLAYER-CARD v${MASS_CARD_VERSION}] Playing playlist on ${speaker}:`, item);
+    const targetType = this._config.grid_content || "playlists";
+    const mediaType = item.media_content_type || (targetType === "favorites" ? "track" : "playlist");
+
+    console.log(`[MASS-PLAYER-CARD v${MASS_CARD_VERSION}] Playing ${mediaType} on ${speaker}:`, item);
 
     const hasMusicAssistantAction = this._hass.services &&
       this._hass.services.music_assistant &&
@@ -598,12 +642,12 @@ class MassPlayerCard extends HTMLElement {
 
     if (hasMusicAssistantAction) {
       this._hass.callService("music_assistant", "play_media", {
-        media_type: item.media_content_type || "playlist",
+        media_type: mediaType,
         media_id: item.media_id || item.name,
       }, { entity_id: speaker });
     } else {
       this._hass.callService("media_player", "play_media", {
-        media_content_type: item.media_content_type || "playlist",
+        media_content_type: mediaType,
         media_content_id: item.media_id || item.name,
       }, { entity_id: speaker });
     }
@@ -645,7 +689,7 @@ if (!alreadyRegistered) {
   window.customCards.push({
     type: "mass-player-card",
     name: "Music Assistant Player & Playlist Card",
-    description: "All-in-one compact player with visual seekbar and auto-discovered playlist grid for Music Assistant.",
+    description: "All-in-one compact player with visual seekbar and auto-discovered playlist/favorites grid for Music Assistant.",
     preview: true,
     documentationURL: "https://github.com/oparada1988/MASS-Player-Card"
   });
