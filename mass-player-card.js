@@ -1,22 +1,23 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.8.2
+ * Version: 3.8.3
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
- * - Remote Nabu Casa Support: Automatic Ingress tunneling for Music Assistant imageproxy
+ * - Remote Nabu Casa & Cloudflare Tunnel Support: Configurable Server URL and Ingress tunneling for Music Assistant imageproxy
+ * - Live Preview synchronization for all Card Editor toggles and settings
  * - Automatic Queue Recovery on initial load & remote reconnects
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
  * - Show Media Labels: Toggle to show/hide text overlays on grid cover art
  * - Automated Track Queue Drawer (with 28px album art thumbnails, smooth accordion animation)
  * - Compact Media Player (Album Art, Artist, Title, Seekbar, Controls)
- * - Auto-Discovered 3-Column Grid directly from Music Assistant
+ * - Auto-Discovered Grid directly from Music Assistant with robust fallback paths
  * - 1-Tap Playback with dynamic service routing
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.8.2";
+const MASS_CARD_VERSION = "3.8.3";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -147,6 +148,14 @@ class MassPlayerCardEditor extends HTMLElement {
           selector: {
             boolean: {}
           }
+        },
+        {
+          name: "mass_url",
+          selector: {
+            text: {
+              type: "url"
+            }
+          }
         }
       ];
 
@@ -161,7 +170,8 @@ class MassPlayerCardEditor extends HTMLElement {
           show_queue: "Auto-Show Track Queue (when playing)",
           show_playlists: "Show Media Grid",
           show_labels: "Show Media Labels on Grid",
-          hide_played_queue: "Clear Played Tracks from Queue"
+          hide_played_queue: "Clear Played Tracks from Queue",
+          mass_url: "Music Assistant Server URL (optional for HTTPS / Cloudflare)"
         };
         return labels[schema.name] || schema.name;
       };
@@ -193,6 +203,7 @@ class MassPlayerCardEditor extends HTMLElement {
       show_playlists: true,
       show_labels: true,
       limit: 0,
+      mass_url: "",
       ...this._config
     };
   }
@@ -206,6 +217,7 @@ class MassPlayerCard extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._playlists = [];
+    this._allPlaylists = [];
     this._queueTracks = [];
     this._loaded = false;
     this._currentSpeaker = null;
@@ -230,9 +242,13 @@ class MassPlayerCard extends HTMLElement {
       grid_content: "playlists",
       columns: 3,
       show_player: true,
+      show_volume: true,
       show_queue: true,
       show_playlists: true,
-      show_labels: true
+      show_labels: true,
+      hide_played_queue: false,
+      limit: 0,
+      mass_url: ""
     };
   }
 
@@ -243,26 +259,61 @@ class MassPlayerCard extends HTMLElement {
     }
     
     const gridContent = config.grid_content || "playlists";
+    const reloadNeeded = (this._currentSpeaker !== speaker || this._currentGridContent !== gridContent);
+    this._currentSpeaker = speaker;
+    this._currentGridContent = gridContent;
 
-    if (this._currentSpeaker !== speaker || this._currentGridContent !== gridContent) {
-      this._currentSpeaker = speaker;
-      this._currentGridContent = gridContent;
-      this._loaded = false;
-      this._queueTracks = [];
-    }
-
+    const oldMassUrl = this._config?.mass_url;
     this._config = {
       grid_content: "playlists",
       columns: 3,
       show_player: true,
+      show_volume: true,
       show_queue: true,
       show_playlists: true,
       show_labels: true,
+      hide_played_queue: false,
       limit: 0,
+      mass_url: "",
       ...config,
       speaker_entity: speaker,
       entity: speaker
     };
+
+    if (reloadNeeded) {
+      this._loaded = false;
+      this._queueTracks = [];
+      this._allPlaylists = [];
+      this._playlists = [];
+      if (this._hass) this.loadPlaylists();
+    } else {
+      // If mass_url changed, re-resolve images immediately
+      if (oldMassUrl !== this._config.mass_url) {
+        if (this._allPlaylists && this._allPlaylists.length > 0) {
+          this._allPlaylists = this._allPlaylists.map(pl => ({
+            ...pl,
+            image: this.resolveImageUrl(pl.raw_thumbnail || pl.image)
+          }));
+        }
+        if (this._playlists && this._playlists.length > 0) {
+          this._playlists = this._playlists.map(pl => ({
+            ...pl,
+            image: this.resolveImageUrl(pl.raw_thumbnail || pl.image)
+          }));
+        }
+        if (this._queueTracks && this._queueTracks.length > 0) {
+          this._queueTracks = this._queueTracks.map(t => ({
+            ...t,
+            image: this.resolveImageUrl(t.raw_thumbnail || t.image)
+          }));
+        }
+      }
+      // Re-render live preview instantly in the GUI editor
+      if (this._hass) {
+        const stateObj = this._hass.states[this._config.speaker_entity];
+        this.render(stateObj);
+      }
+    }
   }
 
   set hass(hass) {
@@ -396,19 +447,34 @@ class MassPlayerCard extends HTMLElement {
       return this._hass && typeof this._hass.hassUrl === "function" ? this._hass.hassUrl(cleanUrl) : cleanUrl;
     }
 
-    // 3. Rewrite Music Assistant imageproxy URLs to the secure Ingress tunnel
+    // 3. User configured Music Assistant server URL (e.g. Cloudflare tunnel or reverse proxy)
+    const massUrl = (this._config && this._config.mass_url) ? this._config.mass_url.trim().replace(/\/+$/, "") : "";
+
+    // 4. Rewrite Music Assistant imageproxy URLs
     if (cleanUrl.includes("imageproxy")) {
       const idx = cleanUrl.indexOf("imageproxy");
       const pathSuffix = cleanUrl.substring(idx);
+
+      if (massUrl) {
+        return `${massUrl}/${pathSuffix}`;
+      }
+
       if (this._ingressUrl) {
         const fullPath = this._ingressUrl + pathSuffix;
         return this._hass && typeof this._hass.hassUrl === "function" ? this._hass.hassUrl(fullPath) : fullPath;
       }
 
-      // If on HTTPS (e.g. Nabu Casa remote connection) and Ingress is not yet established:
-      // Do NOT emit insecure http:// URLs to prevent browser Mixed Content and CORS Private Network Access blocks
-      if (window.location.protocol === "https:" && cleanUrl.startsWith("http://")) {
-        return null;
+      // If on HTTPS (e.g. Nabu Casa remote connection / Cloudflare) and no tunnel/ingress configured:
+      if (window.location.protocol === "https:") {
+        // Upgrade http:// to https:// if host is a domain name rather than a raw IP
+        if (cleanUrl.startsWith("http://")) {
+          const matchHost = cleanUrl.match(/^http:\/\/([^:/]+)(:\d+)?\//);
+          if (matchHost && !matchHost[1].match(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/)) {
+            return cleanUrl.replace(/^http:/, "https:");
+          }
+          // Raw local IP blocked by browser Mixed Content / CORS Private Network Access
+          return null;
+        }
       }
     }
 
@@ -433,7 +499,17 @@ class MassPlayerCard extends HTMLElement {
       }));
     };
 
-    if (speaker) {
+    const isTargetFolder = (c) => {
+      const t = (c.title || "").toLowerCase();
+      const id = (c.media_content_id || "").toLowerCase();
+      const mc = (c.media_class || "").toLowerCase();
+      if (targetType === "favorites") {
+        return t.includes("favorite") || id.includes("favorite") || t.includes("liked") || id.includes("liked") || t.includes("track") || id.includes("track");
+      }
+      return t.includes("playlist") || id.includes("playlist") || mc.includes("playlist");
+    };
+
+    if (speaker && this._hass) {
       try {
         const root = await this._hass.callWS({
           type: "media_player/browse_media",
@@ -441,25 +517,26 @@ class MassPlayerCard extends HTMLElement {
         });
 
         if (root && root.children) {
-          let folder = null;
+          let folder = root.children.find(isTargetFolder);
 
-          if (targetType === "favorites") {
-            folder = root.children.find(c => {
+          // If not found at root, check if nested under Music Assistant folder
+          if (!folder) {
+            const massFolder = root.children.find(c => {
               const t = (c.title || "").toLowerCase();
               const id = (c.media_content_id || "").toLowerCase();
-              return t.includes("favorite") || id.includes("favorite") || t.includes("liked") || id.includes("liked");
-            }) || root.children.find(c => {
-              const t = (c.title || "").toLowerCase();
-              const id = (c.media_content_id || "").toLowerCase();
-              return t.includes("track") || id.includes("track");
+              return t.includes("music assistant") || t.includes("mass") || id.includes("mass");
             });
-          } else {
-            folder = root.children.find(c => {
-              const t = (c.title || "").toLowerCase();
-              const id = (c.media_content_id || "").toLowerCase();
-              const mc = (c.media_class || "").toLowerCase();
-              return t.includes("playlist") || id.includes("playlist") || mc.includes("playlist");
-            });
+            if (massFolder) {
+              const subData = await this._hass.callWS({
+                type: "media_player/browse_media",
+                entity_id: speaker,
+                media_content_id: massFolder.media_content_id,
+                media_content_type: massFolder.media_content_type
+              });
+              if (subData && subData.children) {
+                folder = subData.children.find(isTargetFolder);
+              }
+            }
           }
 
           if (folder) {
@@ -473,9 +550,80 @@ class MassPlayerCard extends HTMLElement {
           }
         }
       } catch (err) {
-        console.warn("[MASS-PLAYER-CARD] Could not query browse_media:", err);
+        console.debug("[MASS-PLAYER-CARD] Standard browse_media query failed, checking fallback media sources:", err);
+      }
+
+      // Fallback A: Direct media-source or library URI
+      if (discovered.length === 0) {
+        const fallbackIds = targetType === "favorites"
+          ? ["media-source://mass/library/tracks", "library://track"]
+          : ["media-source://mass/library/playlists", "media-source://mass/playlists", "library://playlist"];
+        for (const fId of fallbackIds) {
+          try {
+            const directData = await this._hass.callWS({
+              type: "media_player/browse_media",
+              entity_id: speaker,
+              media_content_id: fId,
+              media_content_type: targetType === "favorites" ? "track" : "playlist"
+            });
+            const items = extractItems(directData);
+            if (items.length > 0) {
+              discovered = items;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+
+      // Fallback B: Search other Music Assistant player entities in HA states
+      if (discovered.length === 0 && this._hass.states) {
+        const otherMassPlayers = Object.keys(this._hass.states).filter(eid => 
+          eid.startsWith("media_player.") && eid !== speaker && (eid.includes("mass") || eid.includes("music_assistant"))
+        );
+        for (const otherEid of otherMassPlayers) {
+          try {
+            const oRoot = await this._hass.callWS({
+              type: "media_player/browse_media",
+              entity_id: otherEid
+            });
+            if (oRoot && oRoot.children) {
+              let oFolder = oRoot.children.find(isTargetFolder);
+              if (!oFolder) {
+                const oMassFolder = oRoot.children.find(c => {
+                  const t = (c.title || "").toLowerCase();
+                  const id = (c.media_content_id || "").toLowerCase();
+                  return t.includes("music assistant") || t.includes("mass") || id.includes("mass");
+                });
+                if (oMassFolder) {
+                  const oSub = await this._hass.callWS({
+                    type: "media_player/browse_media",
+                    entity_id: otherEid,
+                    media_content_id: oMassFolder.media_content_id,
+                    media_content_type: oMassFolder.media_content_type
+                  });
+                  if (oSub && oSub.children) oFolder = oSub.children.find(isTargetFolder);
+                }
+              }
+              if (oFolder) {
+                const oData = await this._hass.callWS({
+                  type: "media_player/browse_media",
+                  entity_id: otherEid,
+                  media_content_id: oFolder.media_content_id,
+                  media_content_type: oFolder.media_content_type
+                });
+                const items = extractItems(oData);
+                if (items.length > 0) {
+                  discovered = items;
+                  break;
+                }
+              }
+            }
+          } catch (_) {}
+        }
       }
     }
+
+    this._allPlaylists = discovered;
 
     if (this._config.playlists && Array.isArray(this._config.playlists) && this._config.playlists.length > 0) {
       this._playlists = this._config.playlists.map(pl => {
@@ -493,20 +641,7 @@ class MassPlayerCard extends HTMLElement {
     } else if (discovered.length > 0) {
       this._playlists = discovered;
     } else {
-      this._playlists = targetType === "favorites" ? [
-        { name: "Favorite Tracks", media_id: "tracks" }
-      ] : [
-        { name: "All Out 80s", media_id: "All Out 80s" },
-        { name: "Marvel83' Mix", media_id: "Marvel83' Mix" },
-        { name: "Night Tapes Radio", media_id: "Night Tapes Radio" },
-        { name: "SynthwaveVaporwave", media_id: "SynthwaveVaporwave" },
-        { name: "This Is Brothertiger", media_id: "This Is Brothertiger" },
-        { name: "vaporwave", media_id: "vaporwave" },
-      ];
-    }
-
-    if (this._config.limit && Number(this._config.limit) > 0) {
-      this._playlists = this._playlists.slice(0, Number(this._config.limit));
+      this._playlists = [];
     }
 
     const stateObj = this._hass?.states[this._config.speaker_entity];
@@ -575,13 +710,27 @@ class MassPlayerCard extends HTMLElement {
       // 1. Direct active queue recovery via Music Assistant get_queue action
       if (speaker && this._hass) {
         try {
-          const res = await this._hass.callWS({
-            type: "call_service",
-            domain: "music_assistant",
-            service: "get_queue",
-            service_data: { entity_id: speaker },
-            return_response: true
-          });
+          let res = null;
+          try {
+            res = await this._hass.callWS({
+              type: "call_service",
+              domain: "music_assistant",
+              service: "get_queue",
+              service_data: { entity_id: speaker },
+              return_response: true
+            });
+          } catch (_) {
+            try {
+              res = await this._hass.callWS({
+                type: "call_service",
+                domain: "mass",
+                service: "get_queue",
+                service_data: { entity_id: speaker },
+                return_response: true
+              });
+            } catch (_) {}
+          }
+
           const queueData = res?.response || res;
           const rawItems = Array.isArray(queueData)
             ? queueData
@@ -601,7 +750,7 @@ class MassPlayerCard extends HTMLElement {
             return;
           }
         } catch (queueErr) {
-          console.debug("[MASS-PLAYER-CARD] music_assistant.get_queue service not available or returned no items:", queueErr);
+          console.debug("[MASS-PLAYER-CARD] get_queue service not available or returned no items:", queueErr);
         }
       }
 
@@ -610,9 +759,10 @@ class MassPlayerCard extends HTMLElement {
       const plAttr = (attr.media_playlist || "").toLowerCase().trim();
       const currentTitle = (attr.media_title || "").toLowerCase().trim();
 
+      const candidateLists = (this._allPlaylists && this._allPlaylists.length > 0) ? this._allPlaylists : this._playlists;
       let targetItem = null;
-      if (this._playlists && this._playlists.length > 0) {
-        targetItem = this._playlists.find(p => {
+      if (candidateLists && candidateLists.length > 0) {
+        targetItem = candidateLists.find(p => {
           const n = (p.name || "").toLowerCase().trim();
           return (n && (album.includes(n) || plAttr.includes(n))) || (currentTitle && n === currentTitle);
         });
@@ -685,7 +835,9 @@ class MassPlayerCard extends HTMLElement {
       currentPos += (Date.now() - updatedAt) / 1000;
     }
     const progressPercent = duration > 0 ? Math.min(100, Math.max(0, (currentPos / duration) * 100)) : 0;
-    const playlists = this._playlists;
+    const limit = Number(this._config.limit) || 0;
+    const allItems = (this._allPlaylists && this._allPlaylists.length > 0) ? this._allPlaylists : (this._playlists || []);
+    const playlists = (limit > 0) ? allItems.slice(0, limit) : allItems;
 
     const showPlayer = this._config.show_player !== false;
     const showVolume = this._config.show_volume !== false;
@@ -1233,7 +1385,7 @@ class MassPlayerCard extends HTMLElement {
 
       <div class="unified-card">
         <!-- TOP: Player Section -->
-        <div class="player-section">
+        <div class="player-section" style="${showPlayer ? '' : 'display:none;'}">
           <div class="cover-art">
             ${picture ? `<img class="cover-art-img" src="${picture}" alt="" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
             <svg viewBox="0 0 24 24" style="${picture ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
@@ -1321,15 +1473,15 @@ class MassPlayerCard extends HTMLElement {
         </div>
 
         <!-- SUBTLE SEPARATOR LINE -->
-        <div class="divider-line"></div>
+        <div class="divider-line" style="${(showPlayer && showPlaylists) ? '' : 'display:none;'}"></div>
 
         <!-- BOTTOM: Media Grid Section -->
-        <div class="grid-container">
-          ${playlists.map((pl, idx) => `
+        <div class="grid-container" style="${showPlaylists ? '' : 'display:none;'}">
+          ${playlists.length === 0 ? `<div style="grid-column: 1 / -1; text-align: center; padding: 24px 8px; color: var(--secondary-text-color, #a0a0a0); font-size: 13px;">No media found on this entity.</div>` : playlists.map((pl, idx) => `
             <div class="tile" data-index="${idx}" title="${pl.name}">
-              ${pl.image ? `<img class="tile-img" src="${pl.image}" alt="${pl.name}" loading="lazy" onerror="this.style.display='none'; const ic = this.parentElement.querySelector('.tile-icon'); if (ic) ic.style.display='block'; const ttl = this.parentElement.querySelector('.tile-title'); if (ttl) ttl.style.display='block';" />` : ''}
+              ${pl.image ? `<img class="tile-img" src="${pl.image}" alt="${pl.name}" loading="lazy" onerror="this.style.display='none'; const ic = this.parentElement.querySelector('.tile-icon'); if (ic) ic.style.display='block';" />` : ''}
               <svg class="tile-icon" viewBox="0 0 24 24" style="${pl.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
-              ${showLabels ? `<div class="tile-title">${pl.name}</div>` : (pl.image ? `<div class="tile-title" style="display:none;">${pl.name}</div>` : `<div class="tile-title">${pl.name}</div>`)}
+              ${showLabels ? `<div class="tile-title">${pl.name}</div>` : ''}
             </div>
           `).join('')}
         </div>
