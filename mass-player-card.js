@@ -1,11 +1,12 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.8.5
+ * Version: 3.8.6
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
- * - Zero-Config Auto Ingress Tunneling for Music Assistant imageproxy (Nabu Casa & Remote)
+ * - Auto-Inferred Domain & Ingress Tunneling for Music Assistant imageproxy (hass.domain -> mass.domain)
+ * - Optional Music Assistant Server URL override for Nabu Casa / custom reverse proxies
  * - Live Preview synchronization for all Card Editor toggles and settings
  * - Automatic Queue Recovery on initial load & remote reconnects
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
@@ -17,7 +18,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.8.5";
+const MASS_CARD_VERSION = "3.8.6";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -148,6 +149,14 @@ class MassPlayerCardEditor extends HTMLElement {
           selector: {
             boolean: {}
           }
+        },
+        {
+          name: "mass_url",
+          selector: {
+            text: {
+              type: "url"
+            }
+          }
         }
       ];
 
@@ -162,7 +171,8 @@ class MassPlayerCardEditor extends HTMLElement {
           show_queue: "Auto-Show Track Queue (when playing)",
           show_playlists: "Show Media Grid",
           show_labels: "Show Media Labels on Grid",
-          hide_played_queue: "Clear Played Tracks from Queue"
+          hide_played_queue: "Clear Played Tracks from Queue",
+          mass_url: "Music Assistant Server URL (optional, e.g. https://mass.majonomaki.com)"
         };
         return labels[schema.name] || schema.name;
       };
@@ -194,6 +204,7 @@ class MassPlayerCardEditor extends HTMLElement {
       show_playlists: true,
       show_labels: true,
       limit: 0,
+      mass_url: "",
       ...this._config
     };
   }
@@ -452,12 +463,26 @@ class MassPlayerCard extends HTMLElement {
     }
 
     // 3. User configured Music Assistant server URL (e.g. Cloudflare tunnel or reverse proxy)
-    const massUrl = (this._config && this._config.mass_url) ? this._config.mass_url.trim().replace(/\/+$/, "") : "";
+    let massUrl = (this._config && this._config.mass_url) ? this._config.mass_url.trim().replace(/\/+$/, "") : "";
 
-    // 4. Rewrite Music Assistant imageproxy URLs
+    // 4. Auto-infer Music Assistant domain if on a custom HTTPS domain (e.g. hass.domain.com -> mass.domain.com)
+    if (!massUrl && window.location.protocol === "https:") {
+      const host = window.location.hostname;
+      const match = host.match(/^(?:hass|ha|homeassistant)\.(.+)$/i);
+      if (match && match[1]) {
+        massUrl = `https://mass.${match[1]}`;
+      }
+    }
+
+    // 5. Rewrite Music Assistant imageproxy URLs
     if (cleanUrl.includes("imageproxy")) {
       const idx = cleanUrl.indexOf("imageproxy");
       const pathSuffix = cleanUrl.substring(idx);
+
+      // If already a valid HTTPS URL (e.g. from MA External URL setting)
+      if (cleanUrl.startsWith("https://")) {
+        return cleanUrl;
+      }
 
       if (massUrl) {
         return `${massUrl}/${pathSuffix}`;
