@@ -1,11 +1,12 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.8.3
+ * Version: 3.8.4
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
- * - Remote Nabu Casa & Cloudflare Tunnel Support: Configurable Server URL and Ingress tunneling for Music Assistant imageproxy
+ * - Zero-Config Auto Ingress Tunneling for Music Assistant imageproxy (Nabu Casa & Remote)
+ * - Optional Music Assistant Server URL override for standalone Docker setups
  * - Live Preview synchronization for all Card Editor toggles and settings
  * - Automatic Queue Recovery on initial load & remote reconnects
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
@@ -17,7 +18,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.8.3";
+const MASS_CARD_VERSION = "3.8.4";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -368,45 +369,60 @@ class MassPlayerCard extends HTMLElement {
       for (const slug of candidateSlugs) {
         try {
           let info = null;
-          try {
-            info = await this._hass.callWS({
-              type: "hassio/ingress/info",
-              slug: slug
-            });
-          } catch (_) {
+          // Method 1: Hass.io REST API (standard HA frontend method)
+          if (typeof this._hass.callApi === "function") {
             try {
-              info = await this._hass.callWS({
-                type: "supervisor/ingress/info",
-                slug: slug
-              });
+              const res = await this._hass.callApi("GET", `hassio/addons/${slug}/info`);
+              info = res?.data || res;
             } catch (_) {}
+          }
+
+          // Method 2: Supervisor WebSocket API bridge
+          if (!info || !info.ingress_url) {
+            try {
+              const res = await this._hass.callWS({
+                type: "supervisor/api",
+                endpoint: `/addons/${slug}/info`,
+                method: "get"
+              });
+              info = res?.data || res?.result || res;
+            } catch (_) {}
+          }
+
+          // Method 3: Direct panel config inspection
+          if (!info || !info.ingress_url) {
+            const p = Object.values(this._hass.panels || {}).find(panel =>
+              panel.config?.ingress === slug || panel.url_path === slug || (panel.config?.ingress_url && panel.url_path?.includes("music_assistant"))
+            );
+            if (p?.config?.ingress_url) {
+              info = { ingress_url: p.config.ingress_url };
+            }
           }
 
           if (info && info.ingress_url) {
             this._ingressUrl = info.ingress_url.endsWith('/') ? info.ingress_url : info.ingress_url + '/';
             
             // Bootstrap Ingress session cookies
-            try {
-              await this._hass.callWS({
-                type: "hassio/ingress/session",
-                slug: slug
-              });
-            } catch (_) {
-              try {
-                await this._hass.callWS({
-                  type: "supervisor/ingress/session",
-                  slug: slug
-                });
-              } catch (_) {}
-            }
-
             if (typeof this._hass.callApi === "function") {
               try {
                 await this._hass.callApi("POST", "hassio/ingress/session");
               } catch (_) {}
             }
+            try {
+              await this._hass.callWS({
+                type: "supervisor/api",
+                endpoint: "/ingress/session",
+                method: "post"
+              });
+            } catch (_) {}
 
             // Re-resolve existing items with newly discovered Ingress URL
+            if (this._allPlaylists && this._allPlaylists.length > 0) {
+              this._allPlaylists = this._allPlaylists.map(pl => ({
+                ...pl,
+                image: this.resolveImageUrl(pl.raw_thumbnail || pl.image)
+              }));
+            }
             if (this._playlists && this._playlists.length > 0) {
               this._playlists = this._playlists.map(pl => ({
                 ...pl,
