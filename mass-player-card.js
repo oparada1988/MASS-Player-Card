@@ -1,7 +1,7 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.8.1
+ * Version: 3.8.2
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
@@ -16,7 +16,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.8.1";
+const MASS_CARD_VERSION = "3.8.2";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -289,80 +289,100 @@ class MassPlayerCard extends HTMLElement {
 
   async initIngressSession() {
     if (this._ingressUrl) return this._ingressUrl;
-    if (this._ingressAttempted && this._ingressUrl) return this._ingressUrl;
-    this._ingressAttempted = true;
+    if (this._ingressPromise) return this._ingressPromise;
 
-    let slug = "d5369777_music_assistant";
-    if (this._hass && this._hass.panels) {
-      const p = Object.values(this._hass.panels).find(panel => 
-        (panel.url_path && (panel.url_path.includes("music_assistant") || panel.url_path.includes("mass")))
-      );
-      if (p) {
-        slug = (p.config && p.config.ingress) || p.url_path || slug;
-      }
-    }
+    this._ingressPromise = (async () => {
+      // Prioritize official Supervisor add-on slugs first
+      const candidateSlugs = [
+        "d5369777_music_assistant",
+        "d5369777_music_assistant_beta"
+      ];
 
-    try {
-      let info = null;
-      try {
-        info = await this._hass.callWS({
-          type: "hassio/ingress/info",
-          slug: slug
-        });
-      } catch (wsHassioErr) {
-        try {
-          info = await this._hass.callWS({
-            type: "supervisor/ingress/info",
-            slug: slug
-          });
-        } catch (wsSupErr) {}
-      }
-
-      if (info && info.ingress_url) {
-        this._ingressUrl = info.ingress_url.endsWith('/') ? info.ingress_url : info.ingress_url + '/';
-        
-        try {
-          await this._hass.callWS({
-            type: "hassio/ingress/session",
-            slug: slug
-          });
-        } catch (sessErr1) {
-          try {
-            if (typeof this._hass.callApi === "function") {
-              await this._hass.callApi("POST", "hassio/ingress/session");
-            }
-          } catch (sessErr2) {
-            try {
-              await this._hass.callWS({
-                type: "supervisor/ingress/session",
-                slug: slug
-              });
-            } catch (sessErr3) {}
+      if (this._hass && this._hass.panels) {
+        const panels = Object.values(this._hass.panels);
+        const massPanel = panels.find(panel => 
+          (panel.url_path && (panel.url_path.includes("music_assistant") || panel.url_path.includes("mass"))) ||
+          (panel.component_name && (panel.component_name.includes("music_assistant") || panel.component_name.includes("mass")))
+        );
+        if (massPanel) {
+          if (massPanel.config && massPanel.config.ingress && !candidateSlugs.includes(massPanel.config.ingress)) {
+            candidateSlugs.unshift(massPanel.config.ingress);
+          }
+          if (massPanel.url_path && !candidateSlugs.includes(massPanel.url_path)) {
+            candidateSlugs.push(massPanel.url_path);
           }
         }
-
-        // Re-resolve existing items with the newly found Ingress URL
-        if (this._playlists && this._playlists.length > 0) {
-          this._playlists = this._playlists.map(pl => ({
-            ...pl,
-            image: this.resolveImageUrl(pl.raw_thumbnail || pl.image)
-          }));
-        }
-        if (this._queueTracks && this._queueTracks.length > 0) {
-          this._queueTracks = this._queueTracks.map(t => ({
-            ...t,
-            image: this.resolveImageUrl(t.raw_thumbnail || t.image)
-          }));
-        }
-        const stateObj = this._hass?.states[this._config.speaker_entity];
-        this.render(stateObj);
-
-        return this._ingressUrl;
       }
-    } catch (e) {
-      console.debug("[MASS-PLAYER-CARD] Ingress check:", e);
-    }
-    return null;
+
+      for (const slug of candidateSlugs) {
+        try {
+          let info = null;
+          try {
+            info = await this._hass.callWS({
+              type: "hassio/ingress/info",
+              slug: slug
+            });
+          } catch (_) {
+            try {
+              info = await this._hass.callWS({
+                type: "supervisor/ingress/info",
+                slug: slug
+              });
+            } catch (_) {}
+          }
+
+          if (info && info.ingress_url) {
+            this._ingressUrl = info.ingress_url.endsWith('/') ? info.ingress_url : info.ingress_url + '/';
+            
+            // Bootstrap Ingress session cookies
+            try {
+              await this._hass.callWS({
+                type: "hassio/ingress/session",
+                slug: slug
+              });
+            } catch (_) {
+              try {
+                await this._hass.callWS({
+                  type: "supervisor/ingress/session",
+                  slug: slug
+                });
+              } catch (_) {}
+            }
+
+            if (typeof this._hass.callApi === "function") {
+              try {
+                await this._hass.callApi("POST", "hassio/ingress/session");
+              } catch (_) {}
+            }
+
+            // Re-resolve existing items with newly discovered Ingress URL
+            if (this._playlists && this._playlists.length > 0) {
+              this._playlists = this._playlists.map(pl => ({
+                ...pl,
+                image: this.resolveImageUrl(pl.raw_thumbnail || pl.image)
+              }));
+            }
+            if (this._queueTracks && this._queueTracks.length > 0) {
+              this._queueTracks = this._queueTracks.map(t => ({
+                ...t,
+                image: this.resolveImageUrl(t.raw_thumbnail || t.image)
+              }));
+            }
+            const stateObj = this._hass?.states[this._config.speaker_entity];
+            this.render(stateObj);
+
+            return this._ingressUrl;
+          }
+        } catch (e) {
+          console.debug(`[MASS-PLAYER-CARD] Ingress check failed for slug "${slug}":`, e);
+        }
+      }
+      return null;
+    })().finally(() => {
+      this._ingressPromise = null;
+    });
+
+    return this._ingressPromise;
   }
 
   resolveImageUrl(url) {
@@ -383,6 +403,12 @@ class MassPlayerCard extends HTMLElement {
       if (this._ingressUrl) {
         const fullPath = this._ingressUrl + pathSuffix;
         return this._hass && typeof this._hass.hassUrl === "function" ? this._hass.hassUrl(fullPath) : fullPath;
+      }
+
+      // If on HTTPS (e.g. Nabu Casa remote connection) and Ingress is not yet established:
+      // Do NOT emit insecure http:// URLs to prevent browser Mixed Content and CORS Private Network Access blocks
+      if (window.location.protocol === "https:" && cleanUrl.startsWith("http://")) {
+        return null;
       }
     }
 
@@ -546,14 +572,49 @@ class MassPlayerCard extends HTMLElement {
     const speaker = this._config.speaker_entity;
 
     try {
+      // 1. Direct active queue recovery via Music Assistant get_queue action
+      if (speaker && this._hass) {
+        try {
+          const res = await this._hass.callWS({
+            type: "call_service",
+            domain: "music_assistant",
+            service: "get_queue",
+            service_data: { entity_id: speaker },
+            return_response: true
+          });
+          const queueData = res?.response || res;
+          const rawItems = Array.isArray(queueData)
+            ? queueData
+            : (queueData?.items || queueData?.queue_items || queueData?.[speaker]?.items || []);
+          if (rawItems && rawItems.length > 0) {
+            this._queueTracks = rawItems.map((t, idx) => ({
+              name: t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
+              artist: t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
+              duration: t.duration ? formatDuration(t.duration) : "",
+              media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
+              media_content_type: "track",
+              raw_thumbnail: t.image || t.thumbnail || t.media_item?.image || null,
+              image: this.resolveImageUrl(t.image || t.thumbnail || t.media_item?.image) || null
+            }));
+            const currentState = this._hass?.states[this._config.speaker_entity];
+            this.render(currentState);
+            return;
+          }
+        } catch (queueErr) {
+          console.debug("[MASS-PLAYER-CARD] music_assistant.get_queue service not available or returned no items:", queueErr);
+        }
+      }
+
+      // 2. Fallback: match currently playing media against discovered playlists
       const album = (attr.media_album_name || "").toLowerCase().trim();
       const plAttr = (attr.media_playlist || "").toLowerCase().trim();
+      const currentTitle = (attr.media_title || "").toLowerCase().trim();
 
       let targetItem = null;
       if (this._playlists && this._playlists.length > 0) {
         targetItem = this._playlists.find(p => {
           const n = (p.name || "").toLowerCase().trim();
-          return (album && album.includes(n)) || (plAttr && plAttr.includes(n));
+          return (n && (album.includes(n) || plAttr.includes(n))) || (currentTitle && n === currentTitle);
         });
       }
 
@@ -579,8 +640,8 @@ class MassPlayerCard extends HTMLElement {
             if (plData && plData.children && plData.children.length > 0) {
               const match = plData.children.find(p => {
                 const n = (p.title || "").toLowerCase().trim();
-                return (album && album.includes(n)) || (plAttr && plAttr.includes(n));
-              }) || plData.children[0];
+                return n && (album.includes(n) || plAttr.includes(n));
+              });
               if (match) {
                 await this.loadQueueForPlaylist({
                   name: match.title,
