@@ -1,12 +1,11 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.8.4
+ * Version: 3.8.5
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
  * - Zero-Config Auto Ingress Tunneling for Music Assistant imageproxy (Nabu Casa & Remote)
- * - Optional Music Assistant Server URL override for standalone Docker setups
  * - Live Preview synchronization for all Card Editor toggles and settings
  * - Automatic Queue Recovery on initial load & remote reconnects
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
@@ -18,7 +17,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.8.4";
+const MASS_CARD_VERSION = "3.8.5";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -149,14 +148,6 @@ class MassPlayerCardEditor extends HTMLElement {
           selector: {
             boolean: {}
           }
-        },
-        {
-          name: "mass_url",
-          selector: {
-            text: {
-              type: "url"
-            }
-          }
         }
       ];
 
@@ -171,8 +162,7 @@ class MassPlayerCardEditor extends HTMLElement {
           show_queue: "Auto-Show Track Queue (when playing)",
           show_playlists: "Show Media Grid",
           show_labels: "Show Media Labels on Grid",
-          hide_played_queue: "Clear Played Tracks from Queue",
-          mass_url: "Music Assistant Server URL (optional for HTTPS / Cloudflare)"
+          hide_played_queue: "Clear Played Tracks from Queue"
         };
         return labels[schema.name] || schema.name;
       };
@@ -204,7 +194,6 @@ class MassPlayerCardEditor extends HTMLElement {
       show_playlists: true,
       show_labels: true,
       limit: 0,
-      mass_url: "",
       ...this._config
     };
   }
@@ -248,8 +237,7 @@ class MassPlayerCard extends HTMLElement {
       show_playlists: true,
       show_labels: true,
       hide_played_queue: false,
-      limit: 0,
-      mass_url: ""
+      limit: 0
     };
   }
 
