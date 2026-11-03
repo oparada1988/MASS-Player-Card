@@ -1,7 +1,7 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.8.0
+ * Version: 3.8.1
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
@@ -16,7 +16,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.8.0";
+const MASS_CARD_VERSION = "3.8.1";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -215,6 +215,7 @@ class MassPlayerCard extends HTMLElement {
     this._ingressUrl = null;
     this._ingressAttempted = false;
     this._lastScrolledTrackKey = null;
+    this._isDraggingVolume = false;
   }
 
   static async getConfigElement() {
@@ -270,6 +271,11 @@ class MassPlayerCard extends HTMLElement {
       this._loaded = true;
       this.loadPlaylists();
     }
+    // If user is actively dragging the volume slider, don't overwrite DOM during the drag
+    if (this._isDraggingVolume) {
+      return;
+    }
+
     const stateObj = hass.states[this._config.speaker_entity];
 
     // Auto-detect and load queue on page load or remote reconnect if playing
@@ -823,20 +829,48 @@ class MassPlayerCard extends HTMLElement {
         }
         .volume-slider-container {
           flex: 1;
-          height: 5px;
+          height: 6px;
+          padding: 8px 0;
+          background-clip: content-box;
           background-color: var(--secondary-background-color, rgba(255, 255, 255, 0.12));
-          border-radius: 3px;
+          border-radius: 4px;
           cursor: pointer;
           position: relative;
+          touch-action: none;
+          user-select: none;
+          -webkit-user-select: none;
         }
         .volume-slider-fill {
           height: 100%;
           background-color: var(--secondary-text-color, #a0a0a0);
-          border-radius: 3px;
-          transition: width 0.1s ease, background-color 0.2s;
+          border-radius: 4px;
+          position: relative;
+          pointer-events: none;
         }
-        .volume-slider-container:hover .volume-slider-fill {
+        .volume-slider-container:hover .volume-slider-fill,
+        .volume-slider-container.dragging .volume-slider-fill {
           background-color: var(--primary-color, #03a9f4);
+        }
+        .volume-slider-fill::after {
+          content: '';
+          position: absolute;
+          right: -5px;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background-color: #ffffff;
+          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+          opacity: 0;
+          transition: opacity 0.15s ease, transform 0.1s ease;
+        }
+        .volume-slider-container:hover .volume-slider-fill::after,
+        .volume-slider-container.dragging .volume-slider-fill::after {
+          opacity: 1;
+        }
+        .volume-slider-container.dragging .volume-slider-fill::after {
+          transform: translateY(-50%) scale(1.2);
         }
         .volume-pct {
           font-size: 0.68rem;
@@ -1325,17 +1359,66 @@ class MassPlayerCard extends HTMLElement {
       };
     }
 
-    // Volume seekbar
+    // Smooth 1:1 Interactive Volume Slider
     const volumeBar = this.shadowRoot.getElementById('volumeBar');
-    if (volumeBar) {
-      volumeBar.onclick = (e) => {
+    const volumeFill = this.shadowRoot.querySelector('.volume-slider-fill');
+    const volumePct = this.shadowRoot.querySelector('.volume-pct');
+
+    if (volumeBar && volumeFill && volumePct) {
+      let isDragging = false;
+      let lastCallTime = 0;
+
+      const updateVolume = (e, isFinal = false) => {
         const rect = volumeBar.getBoundingClientRect();
         const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        this._hass.callService("media_player", "volume_set", {
-          entity_id: this._config.speaker_entity,
-          volume_level: ratio
-        });
+        const pct = Math.round(ratio * 100);
+
+        // Immediate 1:1 visual update (0ms lag, butter-smooth)
+        volumeFill.style.width = `${pct}%`;
+        volumePct.textContent = `${pct}%`;
+
+        // Throttled service calls (~75ms) during drag, immediate on release
+        const now = Date.now();
+        if (isFinal || now - lastCallTime > 75) {
+          lastCallTime = now;
+          this._hass.callService("media_player", "volume_set", {
+            entity_id: this._config.speaker_entity,
+            volume_level: ratio
+          });
+        }
       };
+
+      volumeBar.onpointerdown = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        isDragging = true;
+        this._isDraggingVolume = true;
+        volumeBar.setPointerCapture(e.pointerId);
+        volumeBar.classList.add('dragging');
+        updateVolume(e);
+      };
+
+      volumeBar.onpointermove = (e) => {
+        if (!isDragging) return;
+        e.preventDefault();
+        updateVolume(e);
+      };
+
+      const handlePointerUp = (e) => {
+        if (!isDragging) return;
+        isDragging = false;
+        try {
+          volumeBar.releasePointerCapture(e.pointerId);
+        } catch (_) {}
+        volumeBar.classList.remove('dragging');
+        updateVolume(e, true);
+        setTimeout(() => {
+          this._isDraggingVolume = false;
+        }, 400);
+      };
+
+      volumeBar.onpointerup = handlePointerUp;
+      volumeBar.onpointercancel = handlePointerUp;
     }
 
     // Gated Auto-Scroll: only reset to top when track actually advances; otherwise preserve user scroll position!
