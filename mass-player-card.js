@@ -1,13 +1,17 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.8.6
+ * Version: 3.9.0
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
  * - Auto-Inferred Domain & Ingress Tunneling for Music Assistant imageproxy (hass.domain -> mass.domain)
  * - Optional Music Assistant Server URL override for Nabu Casa / custom reverse proxies
  * - Live Preview synchronization for all Card Editor toggles and settings
+ * - Multi-Playlist Party Queueing: Select multiple playlists in sequence with numbered badges and combined multi-playlist playback
+ * - Global Multi-Playlist Shuffle: Shuffle intermingles tracks across all selected queued playlists
+ * - Dedicated Queue Toggle Button in player controls (auto-opens when playing, interactive toggle, idle gating)
+ * - Extended 500px default height for 3 full rows without cut-off or scrollbars
  * - Automatic Queue Recovery on initial load & remote reconnects
  * - On the grid show: Single-select dropdown for "Playlists" or "Favorites"
  * - Show Media Labels: Toggle to show/hide text overlays on grid cover art
@@ -18,7 +22,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.8.6";
+const MASS_CARD_VERSION = "3.9.0";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -151,6 +155,12 @@ class MassPlayerCardEditor extends HTMLElement {
           }
         },
         {
+          name: "max_height",
+          selector: {
+            text: {}
+          }
+        },
+        {
           name: "mass_url",
           selector: {
             text: {
@@ -172,6 +182,7 @@ class MassPlayerCardEditor extends HTMLElement {
           show_playlists: "Show Media Grid",
           show_labels: "Show Media Labels on Grid",
           hide_played_queue: "Clear Played Tracks from Queue",
+          max_height: "Grid Max Height (default: 500px)",
           mass_url: "Music Assistant Server URL (optional, e.g. https://mass.majonomaki.com)"
         };
         return labels[schema.name] || schema.name;
@@ -204,6 +215,7 @@ class MassPlayerCardEditor extends HTMLElement {
       show_playlists: true,
       show_labels: true,
       limit: 0,
+      max_height: "500px",
       mass_url: "",
       ...this._config
     };
@@ -229,6 +241,10 @@ class MassPlayerCard extends HTMLElement {
     this._ingressAttempted = false;
     this._lastScrolledTrackKey = null;
     this._isDraggingVolume = false;
+    this._userQueueToggle = null;
+    this._lastPlayState = false;
+    this._isSelectionMode = false;
+    this._selectedPlaylists = [];
   }
 
   static async getConfigElement() {
@@ -874,7 +890,7 @@ class MassPlayerCard extends HTMLElement {
     const showPlaylists = this._config.show_playlists !== false;
     const showLabels = this._config.show_labels !== false;
     const cols = Number(this._config.columns) || 3;
-    const maxHeight = this._config.max_height || '380px';
+    const maxHeight = this._config.max_height || '500px';
 
     // Volume details
     const vol = typeof attr.volume_level === 'number' ? attr.volume_level : 0.5;
@@ -920,7 +936,20 @@ class MassPlayerCard extends HTMLElement {
       }));
     }
 
-    const isQueueOpen = showQueue && isPlaying && queueTracks.length > 0;
+    // Auto-open on transition from stopped/idle to playing
+    if (this._lastPlayState !== undefined && !this._lastPlayState && isPlaying) {
+      this._userQueueToggle = true;
+    }
+    this._lastPlayState = isPlaying;
+
+    let isQueueOpen = false;
+    if (showQueue) {
+      if (this._userQueueToggle !== null) {
+        isQueueOpen = this._userQueueToggle && isPlaying;
+      } else {
+        isQueueOpen = isPlaying && queueTracks.length > 0;
+      }
+    }
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -1122,13 +1151,18 @@ class MassPlayerCard extends HTMLElement {
           text-align: right;
         }
 
-        /* Playback Mode Button */
-        .mode-btn {
+        /* Playback Mode & Queue Buttons */
+        .mode-btn, .queue-btn {
           color: var(--secondary-text-color, #8e8e93);
           position: relative;
         }
-        .mode-btn.mode-active {
+        .mode-btn.mode-active, .queue-btn.queue-active {
           color: var(--primary-color, #03a9f4);
+        }
+        .queue-btn.queue-disabled {
+          opacity: 0.3;
+          cursor: default;
+          pointer-events: none;
         }
         .ctrl-btn {
           background: none;
@@ -1329,6 +1363,69 @@ class MassPlayerCard extends HTMLElement {
           opacity: 0.8;
         }
 
+        /* Grid Header & Multi-Selection Controls */
+        .grid-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 2px 4px 10px 4px;
+        }
+        .grid-header-left {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .grid-section-title {
+          font-size: 0.70rem;
+          font-weight: 700;
+          letter-spacing: 0.5px;
+          text-transform: uppercase;
+          color: var(--secondary-text-color, #a0a0a0);
+        }
+        .selection-count {
+          font-size: 0.70rem;
+          font-weight: 600;
+          color: var(--primary-color, #03a9f4);
+          background-color: rgba(3, 169, 244, 0.15);
+          padding: 1px 7px;
+          border-radius: 8px;
+        }
+        .grid-header-right {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .pill-btn {
+          background-color: var(--secondary-background-color, rgba(255, 255, 255, 0.08));
+          color: var(--primary-text-color, #ffffff);
+          border: 1px solid var(--ha-card-border-color, var(--divider-color, rgba(255, 255, 255, 0.12)));
+          border-radius: 14px;
+          font-size: 0.72rem;
+          font-weight: 600;
+          padding: 3px 10px;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          cursor: pointer;
+          transition: background-color 0.2s, border-color 0.2s, color 0.2s, transform 0.1s;
+        }
+        .pill-btn svg {
+          width: 14px;
+          height: 14px;
+          fill: currentColor;
+        }
+        .pill-btn:hover {
+          background-color: var(--primary-color, #03a9f4);
+          border-color: var(--primary-color, #03a9f4);
+          color: #ffffff;
+        }
+        .pill-btn:active {
+          transform: scale(0.96);
+        }
+        .cancel-pill-btn {
+          color: var(--secondary-text-color, #a0a0a0);
+        }
+
         /* 3. Media Grid Section */
         .grid-container {
           display: ${showPlaylists ? 'grid' : 'none'};
@@ -1410,6 +1507,110 @@ class MassPlayerCard extends HTMLElement {
           text-overflow: ellipsis;
           z-index: 2;
         }
+
+        /* Selection Badges on Tiles */
+        .tile.tile-selection-mode {
+          border-color: rgba(255, 255, 255, 0.15);
+        }
+        .tile.tile-selected {
+          border-color: var(--primary-color, #03a9f4);
+          box-shadow: 0 0 12px rgba(3, 169, 244, 0.45);
+        }
+        .selection-badge {
+          position: absolute;
+          top: 6px;
+          right: 6px;
+          width: 22px;
+          height: 22px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 0.75rem;
+          font-weight: 700;
+          z-index: 10;
+          box-sizing: border-box;
+          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .selection-badge.badge-empty {
+          background-color: rgba(0, 0, 0, 0.45);
+          border: 1.5px solid rgba(255, 255, 255, 0.6);
+          backdrop-filter: blur(4px);
+        }
+        .selection-badge.badge-active {
+          background-color: var(--primary-color, #03a9f4);
+          color: #ffffff;
+          border: 1.5px solid #ffffff;
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+          transform: scale(1.05);
+        }
+
+        /* Docked Selection Action Bar */
+        .selection-action-bar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          margin-top: 12px;
+          padding: 8px 12px;
+          background-color: rgba(28, 28, 30, 0.95);
+          border: 1px solid var(--primary-color, #03a9f4);
+          border-radius: 12px;
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+          backdrop-filter: blur(8px);
+          animation: slideUpFade 0.25s ease-out;
+        }
+        @keyframes slideUpFade {
+          from {
+            opacity: 0;
+            transform: translateY(8px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        .action-btn {
+          border-radius: 8px;
+          font-size: 0.82rem;
+          font-weight: 600;
+          padding: 8px 14px;
+          cursor: pointer;
+          border: none;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          transition: background-color 0.2s, transform 0.1s, opacity 0.2s;
+        }
+        .action-btn svg {
+          width: 18px;
+          height: 18px;
+          fill: currentColor;
+        }
+        .action-btn:active {
+          transform: scale(0.96);
+        }
+        .action-btn.cancel-btn {
+          background-color: rgba(255, 255, 255, 0.1);
+          color: var(--primary-text-color, #ffffff);
+        }
+        .action-btn.cancel-btn:hover {
+          background-color: rgba(255, 255, 255, 0.18);
+        }
+        .action-btn.play-selected-btn {
+          background-color: var(--primary-color, #03a9f4);
+          color: #ffffff;
+          flex: 1;
+          justify-content: center;
+        }
+        .action-btn.play-selected-btn:hover {
+          filter: brightness(1.15);
+        }
+        .action-btn.play-selected-btn.disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+          filter: none;
+        }
       </style>
 
       <div class="unified-card">
@@ -1451,7 +1652,9 @@ class MassPlayerCard extends HTMLElement {
                   <svg viewBox="0 0 24 24"><path d="m6 18 8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
                 </button>
               </div>
-              <div style="width: 32px;"></div>
+              <button class="ctrl-btn queue-btn ${isQueueOpen ? 'queue-active' : ''} ${!isPlaying ? 'queue-disabled' : ''}" id="queueToggleBtn" title="${!isPlaying ? 'Queue inactive (idle)' : isQueueOpen ? 'Hide Queue' : 'Show Queue'}">
+                <svg viewBox="0 0 24 24"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>
+              </button>
             </div>
 
             <!-- Volume Slider Row -->
@@ -1504,16 +1707,57 @@ class MassPlayerCard extends HTMLElement {
         <!-- SUBTLE SEPARATOR LINE -->
         <div class="divider-line" style="${(showPlayer && showPlaylists) ? '' : 'display:none;'}"></div>
 
+        <!-- GRID HEADER & MULTI-SELECTION CONTROLS -->
+        <div class="grid-header" style="${showPlaylists ? 'display: flex;' : 'display: none;'}">
+          <div class="grid-header-left">
+            <span class="grid-section-title">${this._isSelectionMode ? 'SELECT PLAYLISTS TO QUEUE' : (this._config.grid_content === 'favorites' ? 'FAVORITES' : 'PLAYLISTS')}</span>
+            ${this._isSelectionMode ? `<span class="selection-count">${this._selectedPlaylists.length} selected</span>` : ''}
+          </div>
+          <div class="grid-header-right">
+            ${!this._isSelectionMode ? `
+              <button class="pill-btn select-mode-btn" id="startSelectBtn" title="Select multiple playlists to play sequentially or blend together">
+                <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                <span>Select to Queue</span>
+              </button>
+            ` : `
+              <button class="pill-btn select-all-btn" id="selectAllBtn" title="Select all playlists in order">
+                ${this._selectedPlaylists.length === playlists.length && playlists.length > 0 ? 'Deselect All' : 'Select All'}
+              </button>
+              <button class="pill-btn cancel-pill-btn" id="cancelSelectBtn" title="Cancel selection">Cancel</button>
+            `}
+          </div>
+        </div>
+
         <!-- BOTTOM: Media Grid Section -->
         <div class="grid-container" style="${showPlaylists ? '' : 'display:none;'}">
-          ${playlists.length === 0 ? `<div style="grid-column: 1 / -1; text-align: center; padding: 24px 8px; color: var(--secondary-text-color, #a0a0a0); font-size: 13px;">No media found on this entity.</div>` : playlists.map((pl, idx) => `
-            <div class="tile" data-index="${idx}" title="${pl.name}">
-              ${pl.image ? `<img class="tile-img" src="${pl.image}" alt="${pl.name}" loading="lazy" onerror="this.style.display='none'; const ic = this.parentElement.querySelector('.tile-icon'); if (ic) ic.style.display='block';" />` : ''}
-              <svg class="tile-icon" viewBox="0 0 24 24" style="${pl.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
-              ${showLabels ? `<div class="tile-title">${pl.name}</div>` : ''}
-            </div>
-          `).join('')}
+          ${playlists.length === 0 ? `<div style="grid-column: 1 / -1; text-align: center; padding: 24px 8px; color: var(--secondary-text-color, #a0a0a0); font-size: 13px;">No media found on this entity.</div>` : playlists.map((pl, idx) => {
+            const isSelected = this._selectedPlaylists.some(p => (p.media_id && p.media_id === pl.media_id) || (p.name && p.name === pl.name));
+            const selectIndex = isSelected ? this._selectedPlaylists.findIndex(p => (p.media_id && p.media_id === pl.media_id) || (p.name && p.name === pl.name)) + 1 : 0;
+            return `
+              <div class="tile ${this._isSelectionMode ? 'tile-selection-mode' : ''} ${isSelected ? 'tile-selected' : ''}" data-index="${idx}" title="${pl.name}">
+                ${this._isSelectionMode ? `
+                  <div class="selection-badge ${isSelected ? 'badge-active' : 'badge-empty'}">
+                    ${isSelected ? selectIndex : ''}
+                  </div>
+                ` : ''}
+                ${pl.image ? `<img class="tile-img" src="${pl.image}" alt="${pl.name}" loading="lazy" onerror="this.style.display='none'; const ic = this.parentElement.querySelector('.tile-icon'); if (ic) ic.style.display='block';" />` : ''}
+                <svg class="tile-icon" viewBox="0 0 24 24" style="${pl.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                ${showLabels ? `<div class="tile-title">${pl.name}</div>` : ''}
+              </div>
+            `;
+          }).join('')}
         </div>
+
+        <!-- DOCKED SELECTION ACTION BAR -->
+        ${this._isSelectionMode && showPlaylists ? `
+          <div class="selection-action-bar">
+            <button class="action-btn cancel-btn" id="actionBarCancelBtn">Cancel</button>
+            <button class="action-btn play-selected-btn ${this._selectedPlaylists.length === 0 ? 'disabled' : ''}" id="actionBarPlayBtn">
+              <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <span>Play Selected ${this._selectedPlaylists.length > 0 ? `(${this._selectedPlaylists.length})` : ''}</span>
+            </button>
+          </div>
+        ` : ''}
       </div>
     `;
 
@@ -1534,6 +1778,16 @@ class MassPlayerCard extends HTMLElement {
     if (nextBtn) {
       nextBtn.onclick = () => {
         this._hass.callService("media_player", "media_next_track", { entity_id: this._config.speaker_entity });
+      };
+    }
+
+    // Queue Toggle Button
+    const queueToggleBtn = this.shadowRoot.getElementById('queueToggleBtn');
+    if (queueToggleBtn) {
+      queueToggleBtn.onclick = () => {
+        if (!isPlaying) return;
+        this._userQueueToggle = !isQueueOpen;
+        this.render(this._hass?.states[this._config?.speaker_entity]);
       };
     }
 
@@ -1568,9 +1822,72 @@ class MassPlayerCard extends HTMLElement {
       tile.onclick = () => {
         const idx = parseInt(tile.getAttribute('data-index'), 10);
         const item = playlists[idx];
+        if (this._isSelectionMode) {
+          const existingIdx = this._selectedPlaylists.findIndex(p => (p.media_id && p.media_id === item.media_id) || (p.name && p.name === item.name));
+          if (existingIdx >= 0) {
+            this._selectedPlaylists.splice(existingIdx, 1);
+          } else {
+            this._selectedPlaylists.push(item);
+          }
+          this.render(this._hass?.states[this._config?.speaker_entity]);
+          return;
+        }
         this.playPlaylist(item);
       };
     });
+
+    // Multi-Selection Controls
+    const startSelectBtn = this.shadowRoot.getElementById('startSelectBtn');
+    if (startSelectBtn) {
+      startSelectBtn.onclick = () => {
+        this._isSelectionMode = true;
+        this._selectedPlaylists = [];
+        this.render(this._hass?.states[this._config?.speaker_entity]);
+      };
+    }
+
+    const cancelSelectBtn = this.shadowRoot.getElementById('cancelSelectBtn');
+    if (cancelSelectBtn) {
+      cancelSelectBtn.onclick = () => {
+        this._isSelectionMode = false;
+        this._selectedPlaylists = [];
+        this.render(this._hass?.states[this._config?.speaker_entity]);
+      };
+    }
+
+    const selectAllBtn = this.shadowRoot.getElementById('selectAllBtn');
+    if (selectAllBtn) {
+      selectAllBtn.onclick = () => {
+        if (this._selectedPlaylists.length === playlists.length && playlists.length > 0) {
+          this._selectedPlaylists = [];
+        } else {
+          this._selectedPlaylists = [...playlists];
+        }
+        this.render(this._hass?.states[this._config?.speaker_entity]);
+      };
+    }
+
+    const actionBarCancelBtn = this.shadowRoot.getElementById('actionBarCancelBtn');
+    if (actionBarCancelBtn) {
+      actionBarCancelBtn.onclick = () => {
+        this._isSelectionMode = false;
+        this._selectedPlaylists = [];
+        this.render(this._hass?.states[this._config?.speaker_entity]);
+      };
+    }
+
+    const actionBarPlayBtn = this.shadowRoot.getElementById('actionBarPlayBtn');
+    if (actionBarPlayBtn) {
+      actionBarPlayBtn.onclick = () => {
+        if (this._selectedPlaylists.length === 0) return;
+        const toPlay = [...this._selectedPlaylists];
+        this._isSelectionMode = false;
+        this._selectedPlaylists = [];
+        this._userQueueToggle = true;
+        this.playMultiplePlaylists(toPlay);
+        this.render(this._hass?.states[this._config?.speaker_entity]);
+      };
+    }
 
     // 3-State Mode Button (Normal -> Repeat -> Shuffle -> Normal)
     const modeBtn = this.shadowRoot.getElementById('modeBtn');
@@ -1680,12 +1997,61 @@ class MassPlayerCard extends HTMLElement {
     });
   }
 
+  async playMultiplePlaylists(items) {
+    if (!items || items.length === 0) return;
+    const speaker = this._config.speaker_entity;
+    const targetType = this._config.grid_content || "playlists";
+
+    console.log(`[MASS-PLAYER-CARD v${MASS_CARD_VERSION}] Enqueuing ${items.length} playlists on ${speaker}:`, items);
+
+    // Auto-open queue and load queue for first item
+    this._userQueueToggle = true;
+    this.loadQueueForPlaylist(items[0]);
+
+    const hasMusicAssistantAction = this._hass.services &&
+      this._hass.services.music_assistant &&
+      this._hass.services.music_assistant.play_media;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const mediaType = item.media_content_type || (targetType === "favorites" ? "track" : "playlist");
+      const enqueueMode = (i === 0) ? "play" : "add";
+
+      if (hasMusicAssistantAction) {
+        await this._hass.callService("music_assistant", "play_media", {
+          media_type: mediaType,
+          media_id: item.media_id || item.name,
+          enqueue: enqueueMode
+        }, { entity_id: speaker });
+      } else {
+        await this._hass.callService("media_player", "play_media", {
+          media_content_type: mediaType,
+          media_content_id: item.media_id || item.name,
+          enqueue: enqueueMode,
+          extra: { enqueue: enqueueMode }
+        }, { entity_id: speaker });
+      }
+
+      if (i < items.length - 1) {
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+
+    // Refresh queue after loading
+    setTimeout(() => {
+      this.fetchQueue();
+    }, 1000);
+  }
+
   playPlaylist(item) {
     const speaker = this._config.speaker_entity;
     const targetType = this._config.grid_content || "playlists";
     const mediaType = item.media_content_type || (targetType === "favorites" ? "track" : "playlist");
 
     console.log(`[MASS-PLAYER-CARD v${MASS_CARD_VERSION}] Playing ${mediaType} on ${speaker}:`, item);
+
+    // Auto-open queue when starting playback
+    this._userQueueToggle = true;
 
     // Auto-fetch upcoming queue for this playlist
     this.loadQueueForPlaylist(item);
