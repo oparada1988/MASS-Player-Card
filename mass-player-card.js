@@ -1,7 +1,7 @@
 /**
  * Music Assistant Player & Playlist Card for Home Assistant (HACS)
  * Repository: https://github.com/oparada1988/MASS-Player-Card
- * Version: 3.9.0
+ * Version: 3.9.1
  * 
  * Features:
  * - Full Home Assistant GUI Card Editor (no YAML required)
@@ -22,7 +22,7 @@
  * - Sleek dark-mode styling matching Home Assistant Lovelace
  */
 
-const MASS_CARD_VERSION = "3.9.0";
+const MASS_CARD_VERSION = "3.9.1";
 
 console.info(
   `%c MASS-PLAYER-CARD %c v${MASS_CARD_VERSION} `,
@@ -245,6 +245,7 @@ class MassPlayerCard extends HTMLElement {
     this._lastPlayState = false;
     this._isSelectionMode = false;
     this._selectedPlaylists = [];
+    this._lastMediaTitle = null;
   }
 
   static async getConfigElement() {
@@ -344,12 +345,35 @@ class MassPlayerCard extends HTMLElement {
     }
 
     const stateObj = hass.states[this._config.speaker_entity];
+    const isPlaying = stateObj?.state === "playing";
+    const currentTitle = stateObj?.attributes?.media_title || "";
+
+    // Clear queue when player goes idle or off so next playback initiates fresh
+    if (stateObj?.state === "idle" || stateObj?.state === "off") {
+      if (this._queueTracks && this._queueTracks.length > 0) {
+        this._queueTracks = [];
+        this._lastMediaTitle = null;
+      }
+    }
 
     // Auto-detect and load queue on page load or remote reconnect if playing
-    const isPlaying = stateObj?.state === "playing";
-    if (isPlaying && (!this._queueTracks || this._queueTracks.length === 0) && !this._fetchingQueue) {
-      this._autoLoadCurrentQueue(stateObj);
+    if (isPlaying && !this._fetchingQueue) {
+      if (!this._queueTracks || this._queueTracks.length === 0) {
+        this._autoLoadCurrentQueue(stateObj);
+      } else if (currentTitle && currentTitle !== this._lastMediaTitle) {
+        // Track changed - check if new title exists in existing queue
+        const curTitleNorm = currentTitle.toLowerCase().trim();
+        const found = this._queueTracks.some(t => {
+          const tName = (t.name || "").toLowerCase().trim();
+          return tName && (curTitleNorm === tName || curTitleNorm.includes(tName) || tName.includes(curTitleNorm));
+        });
+        if (!found) {
+          // Playing something not in our current queue, re-sync from server
+          this._autoLoadCurrentQueue(stateObj, true);
+        }
+      }
     }
+    this._lastMediaTitle = currentTitle;
 
     this.render(stateObj);
   }
@@ -744,15 +768,127 @@ class MassPlayerCard extends HTMLElement {
     this.render(stateObj);
   }
 
-  async _autoLoadCurrentQueue(stateObj) {
-    if (this._fetchingQueue || !stateObj) return;
+  fetchQueue(force = false) {
+    const stateObj = this._hass?.states[this._config?.speaker_entity];
+    if (stateObj) {
+      return this._autoLoadCurrentQueue(stateObj, force);
+    }
+    return Promise.resolve();
+  }
+
+  async _autoLoadCurrentQueue(stateObj, force = false) {
+    if ((this._fetchingQueue && !force) || !stateObj) return;
     this._fetchingQueue = true;
     await this.initIngressSession();
     const attr = stateObj.attributes || {};
     const speaker = this._config.speaker_entity;
 
     try {
-      // 1. Direct active queue recovery via Music Assistant get_queue action
+      // 1. High-priority: mass_queue integration (droans/mass_queue get_queue_items)
+      if (speaker && this._hass) {
+        try {
+          const res = await this._hass.callWS({
+            type: "call_service",
+            domain: "mass_queue",
+            service: "get_queue_items",
+            service_data: { entity: speaker, limit: 100 },
+            return_response: true
+          });
+          const rawItems = Array.isArray(res)
+            ? res
+            : Array.isArray(res?.response)
+            ? res.response
+            : Array.isArray(res?.response?.[speaker])
+            ? res.response[speaker]
+            : Array.isArray(res?.[speaker])
+            ? res[speaker]
+            : (res?.response?.items || res?.items || []);
+
+          if (Array.isArray(rawItems) && rawItems.length > 0) {
+            this._queueTracks = rawItems.map((t, idx) => ({
+              name: t.media_title || t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
+              artist: t.media_artist || t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
+              duration: t.media_duration ? formatDuration(t.media_duration) : (t.duration ? formatDuration(t.duration) : ""),
+              queue_item_id: t.queue_item_id || t.item_id || null,
+              media_id: t.media_content_id || t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
+              media_content_type: "track",
+              raw_thumbnail: t.media_image || t.image || t.thumbnail || t.media_item?.image || null,
+              image: this.resolveImageUrl(t.media_image || t.image || t.thumbnail || t.media_item?.image) || null
+            }));
+            const currentState = this._hass?.states[this._config.speaker_entity];
+            this.render(currentState);
+            return;
+          }
+        } catch (mqErr) {
+          console.debug("[MASS-PLAYER-CARD] mass_queue.get_queue_items service unavailable or failed:", mqErr);
+        }
+      }
+
+      // 2. Direct Music Assistant API call for player_queues/items via mass_queue.send_command or Ingress POST
+      if (speaker && this._hass) {
+        try {
+          const queueId = attr.active_queue || speaker;
+          let items = null;
+
+          // Method A: mass_queue.send_command bridge
+          try {
+            const cmdRes = await this._hass.callWS({
+              type: "call_service",
+              domain: "mass_queue",
+              service: "send_command",
+              service_data: {
+                command: "player_queues/items",
+                args: { queue_id: queueId, limit: 100 }
+              },
+              return_response: true
+            });
+            const data = cmdRes?.response || cmdRes;
+            if (Array.isArray(data)) items = data;
+            else if (Array.isArray(data?.items)) items = data.items;
+          } catch (_) {}
+
+          // Method B: Direct Ingress or mass_url REST endpoint
+          if (!items && (this._ingressUrl || this._config.mass_url)) {
+            const base = (this._ingressUrl || this._config.mass_url).replace(/\/+$/, "");
+            try {
+              const fetchRes = await fetch(`${base}/api`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  message_id: Date.now(),
+                  command: "player_queues/items",
+                  args: { queue_id: queueId, limit: 100 }
+                })
+              });
+              if (fetchRes.ok) {
+                const json = await fetchRes.json();
+                if (Array.isArray(json)) items = json;
+                else if (Array.isArray(json?.items)) items = json.items;
+              }
+            } catch (_) {}
+          }
+
+          if (Array.isArray(items) && items.length > 0) {
+            this._queueTracks = items.map((t, idx) => ({
+              name: t.name || t.title || t.media_item?.name || `Track ${idx + 1}`,
+              artist: t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
+              duration: t.duration ? formatDuration(t.duration) : "",
+              queue_item_id: t.queue_item_id || t.item_id || null,
+              media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.name,
+              media_content_type: "track",
+              raw_thumbnail: t.image || t.thumbnail || t.media_item?.image || null,
+              image: this.resolveImageUrl(t.image || t.thumbnail || t.media_item?.image) || null
+            }));
+            const currentState = this._hass?.states[this._config.speaker_entity];
+            this.render(currentState);
+            return;
+          }
+        } catch (apiErr) {
+          console.debug("[MASS-PLAYER-CARD] player_queues/items API call failed:", apiErr);
+        }
+      }
+
+      // 3. Fallback: Native music_assistant get_queue action
       if (speaker && this._hass) {
         try {
           let res = null;
@@ -776,30 +912,70 @@ class MassPlayerCard extends HTMLElement {
             } catch (_) {}
           }
 
-          const queueData = res?.response || res;
-          const rawItems = Array.isArray(queueData)
-            ? queueData
-            : (queueData?.items || queueData?.queue_items || queueData?.[speaker]?.items || []);
-          if (rawItems && rawItems.length > 0) {
-            this._queueTracks = rawItems.map((t, idx) => ({
-              name: t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
-              artist: t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
-              duration: t.duration ? formatDuration(t.duration) : "",
-              media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
-              media_content_type: "track",
-              raw_thumbnail: t.image || t.thumbnail || t.media_item?.image || null,
-              image: this.resolveImageUrl(t.image || t.thumbnail || t.media_item?.image) || null
-            }));
-            const currentState = this._hass?.states[this._config.speaker_entity];
-            this.render(currentState);
-            return;
+          const qData = res?.response?.[speaker] || res?.response || res?.[speaker] || res;
+          if (qData) {
+            const rawItems = Array.isArray(qData)
+              ? qData
+              : (Array.isArray(qData?.items) ? qData.items : (Array.isArray(qData?.queue_items) ? qData.queue_items : null));
+            if (rawItems && rawItems.length > 0) {
+              this._queueTracks = rawItems.map((t, idx) => ({
+                name: t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
+                artist: t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
+                duration: t.duration ? formatDuration(t.duration) : "",
+                queue_item_id: t.queue_item_id || t.item_id || null,
+                media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
+                media_content_type: "track",
+                raw_thumbnail: t.image || t.thumbnail || t.media_item?.image || null,
+                image: this.resolveImageUrl(t.image || t.thumbnail || t.media_item?.image) || null
+              }));
+              const currentState = this._hass?.states[this._config.speaker_entity];
+              this.render(currentState);
+              return;
+            }
+
+            // If get_queue provided current_item and/or next_item
+            const currentItem = qData.current_item;
+            const nextItem = qData.next_item;
+            if (currentItem || nextItem) {
+              const partialTracks = [];
+              if (currentItem) {
+                partialTracks.push({
+                  name: currentItem.name || currentItem.title || "Current Track",
+                  artist: currentItem.artist || currentItem.media_item?.artists?.[0]?.name || "",
+                  duration: currentItem.duration ? formatDuration(currentItem.duration) : "",
+                  queue_item_id: currentItem.queue_item_id || null,
+                  media_id: currentItem.queue_item_id || currentItem.media_item?.uri || currentItem.name,
+                  media_content_type: "track",
+                  raw_thumbnail: currentItem.image || null,
+                  image: this.resolveImageUrl(currentItem.image) || null
+                });
+              }
+              if (nextItem) {
+                partialTracks.push({
+                  name: nextItem.name || nextItem.title || "Next Track",
+                  artist: nextItem.artist || nextItem.media_item?.artists?.[0]?.name || "",
+                  duration: nextItem.duration ? formatDuration(nextItem.duration) : "",
+                  queue_item_id: nextItem.queue_item_id || null,
+                  media_id: nextItem.queue_item_id || nextItem.media_item?.uri || nextItem.name,
+                  media_content_type: "track",
+                  raw_thumbnail: nextItem.image || null,
+                  image: this.resolveImageUrl(nextItem.image) || null
+                });
+              }
+              if (partialTracks.length > 0) {
+                this._queueTracks = partialTracks;
+                const currentState = this._hass?.states[this._config.speaker_entity];
+                this.render(currentState);
+                return;
+              }
+            }
           }
         } catch (queueErr) {
           console.debug("[MASS-PLAYER-CARD] get_queue service not available or returned no items:", queueErr);
         }
       }
 
-      // 2. Fallback: match currently playing media against discovered playlists
+      // 4. Fallback: match currently playing media against discovered playlists
       const album = (attr.media_album_name || "").toLowerCase().trim();
       const plAttr = (attr.media_playlist || "").toLowerCase().trim();
       const currentTitle = (attr.media_title || "").toLowerCase().trim();
@@ -2053,7 +2229,7 @@ class MassPlayerCard extends HTMLElement {
     // Auto-open queue when starting playback
     this._userQueueToggle = true;
 
-    // Auto-fetch upcoming queue for this playlist
+    // Instant preview for immediate responsive feedback
     this.loadQueueForPlaylist(item);
 
     const hasMusicAssistantAction = this._hass.services &&
@@ -2071,11 +2247,25 @@ class MassPlayerCard extends HTMLElement {
         media_content_id: item.media_id || item.name,
       }, { entity_id: speaker });
     }
+
+    // Sync official queue from server once Music Assistant ingests the playlist
+    setTimeout(() => {
+      this.fetchQueue(true);
+    }, 1200);
   }
 
   playTrack(track) {
     const speaker = this._config.speaker_entity;
     console.log(`[MASS-PLAYER-CARD v${MASS_CARD_VERSION}] Playing queue track on ${speaker}:`, track);
+
+    // If track has a queue_item_id and mass_queue integration is available, jump directly
+    if (track.queue_item_id && this._hass?.services?.mass_queue?.play_queue_item) {
+      this._hass.callService("mass_queue", "play_queue_item", {
+        entity: speaker,
+        queue_item_id: track.queue_item_id
+      });
+      return;
+    }
 
     const hasMusicAssistantAction = this._hass.services &&
       this._hass.services.music_assistant &&
