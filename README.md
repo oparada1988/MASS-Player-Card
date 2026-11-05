@@ -78,6 +78,7 @@ show_labels: false       # Set false to show pure edge-to-edge album art without
 | `hide_played_queue` | `boolean` | `true` | Automatically clears already-played tracks from the Upcoming Queue and auto-scrolls to the active song. |
 | `max_height` | `string` | `500px` | Maximum height of the scrollable grid (e.g. `none`, `500px`, `380px`). |
 | `mass_url` | `string` | `""` | Optional Music Assistant Server URL override (e.g. `https://mass.domain.com`). |
+| `mass_token` | `string` | `""` | Optional Music Assistant Long-Lived Access Token for direct full queue synchronization with authenticated servers. |
 | `playlists` | `list` | `auto` | *(Optional)* Manually specify custom items if you wish to override auto-discovery. |
 
 ---

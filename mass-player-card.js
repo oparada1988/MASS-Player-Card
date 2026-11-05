@@ -178,14 +178,24 @@ class MassPlayerCardEditor extends HTMLElement {
       );
     }
 
-    schema.push({
-      name: "mass_url",
-      selector: {
-        text: {
-          type: "url"
+    schema.push(
+      {
+        name: "mass_url",
+        selector: {
+          text: {
+            type: "url"
+          }
+        }
+      },
+      {
+        name: "mass_token",
+        selector: {
+          text: {
+            type: "password"
+          }
         }
       }
-    });
+    );
 
     return schema;
   }
@@ -245,7 +255,8 @@ class MassPlayerCardEditor extends HTMLElement {
         queue_limit: isQueue ? "Queue Track Limit (1 - 10 tracks)" : "Queue Track Limit (1 - 5 tracks)",
         hide_played_queue: "Clear Played Tracks from Queue",
         max_height: "Grid Max Height (default: 500px)",
-        mass_url: "Music Assistant Server URL (optional, e.g. https://mass.majonomaki.com)"
+        mass_url: "Music Assistant Server URL (optional, e.g. https://mass.majonomaki.com)",
+        mass_token: "Music Assistant API Token (optional, for direct full queue sync)"
       };
       return labels[schema.name] || schema.name;
     };
@@ -265,6 +276,7 @@ class MassPlayerCardEditor extends HTMLElement {
       limit: 0,
       max_height: "500px",
       mass_url: "",
+      mass_token: "",
       ...this._config
     };
   }
@@ -345,6 +357,7 @@ class MassPlayerCard extends HTMLElement {
       queue_limit: 5,
       limit: 0,
       mass_url: "",
+      mass_token: "",
       ...config,
       speaker_entity: speaker,
       entity: speaker
@@ -797,6 +810,12 @@ class MassPlayerCard extends HTMLElement {
           image: this.resolveImageUrl(t.thumbnail) || this.resolveImageUrl(item.raw_thumbnail || item.image) || null
         }));
         this._queueTotalCount = data.children.length;
+        window.__mass_player_card_queue = window.__mass_player_card_queue || {};
+        window.__mass_player_card_queue[speaker] = this._queueTracks;
+        try {
+          localStorage.setItem('mass_queue_' + speaker, JSON.stringify(this._queueTracks));
+          localStorage.setItem('mass_playlist_' + speaker, JSON.stringify(item));
+        } catch (_) {}
       } else {
         this._queueTracks = [{
           name: item.name,
@@ -840,7 +859,46 @@ class MassPlayerCard extends HTMLElement {
     const attr = stateObj.attributes || {};
     const speaker = this._config.speaker_entity;
 
+    const extractThumb = (item) => {
+      if (!item) return null;
+      return (
+        item.image ||
+        item.thumbnail ||
+        item.media_image ||
+        item.media_item?.image ||
+        item.media_item?.thumbnail ||
+        item.media_item?.album?.image ||
+        (Array.isArray(item.media_item?.metadata?.images) ? item.media_item.metadata.images[0]?.path : null) ||
+        null
+      );
+    };
+
     try {
+      // 0. Shared memory and localStorage queue cache across card instances
+      if ((!this._queueTracks || this._queueTracks.length <= 2) && speaker) {
+        const sharedQueue = window.__mass_player_card_queue?.[speaker] || null;
+        if (sharedQueue && Array.isArray(sharedQueue) && sharedQueue.length > 2) {
+          this._queueTracks = sharedQueue;
+          this._queueTotalCount = sharedQueue.length;
+          const currentState = this._hass?.states[this._config.speaker_entity];
+          this.render(currentState);
+          return;
+        }
+        try {
+          const cachedJson = localStorage.getItem('mass_queue_' + speaker);
+          if (cachedJson) {
+            const parsed = JSON.parse(cachedJson);
+            if (Array.isArray(parsed) && parsed.length > 2) {
+              this._queueTracks = parsed;
+              this._queueTotalCount = parsed.length;
+              const currentState = this._hass?.states[this._config.speaker_entity];
+              this.render(currentState);
+              return;
+            }
+          }
+        } catch (_) {}
+      }
+
       // 1. High-priority: mass_queue integration (droans/mass_queue get_queue_items)
       if (speaker && this._hass) {
         try {
@@ -862,16 +920,25 @@ class MassPlayerCard extends HTMLElement {
             : (res?.response?.items || res?.items || []);
 
           if (Array.isArray(rawItems) && rawItems.length > 0) {
-            this._queueTracks = rawItems.map((t, idx) => ({
-              name: t.media_title || t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
-              artist: t.media_artist || t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
-              duration: t.media_duration ? formatDuration(t.media_duration) : (t.duration ? formatDuration(t.duration) : ""),
-              queue_item_id: t.queue_item_id || t.item_id || null,
-              media_id: t.media_content_id || t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
-              media_content_type: "track",
-              raw_thumbnail: t.media_image || t.image || t.thumbnail || t.media_item?.image || null,
-              image: this.resolveImageUrl(t.media_image || t.image || t.thumbnail || t.media_item?.image) || null
-            }));
+            this._queueTracks = rawItems.map((t, idx) => {
+              const rawThumb = extractThumb(t);
+              return {
+                name: t.media_title || t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
+                artist: t.media_artist || t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
+                duration: t.media_duration ? formatDuration(t.media_duration) : (t.duration ? formatDuration(t.duration) : ""),
+                queue_item_id: t.queue_item_id || t.item_id || null,
+                media_id: t.media_content_id || t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
+                media_content_type: "track",
+                raw_thumbnail: rawThumb,
+                image: this.resolveImageUrl(rawThumb) || null
+              };
+            });
+            this._queueTotalCount = this._queueTracks.length;
+            window.__mass_player_card_queue = window.__mass_player_card_queue || {};
+            window.__mass_player_card_queue[speaker] = this._queueTracks;
+            try {
+              localStorage.setItem('mass_queue_' + speaker, JSON.stringify(this._queueTracks));
+            } catch (_) {}
             const currentState = this._hass?.states[this._config.speaker_entity];
             this.render(currentState);
             return;
@@ -881,61 +948,99 @@ class MassPlayerCard extends HTMLElement {
         }
       }
 
-      // 2. Direct Music Assistant API call for player_queues/items via mass_queue.send_command or Ingress POST
+      // 2. Direct Music Assistant API call for player_queues/items via mass_queue.send_command or Ingress/REST endpoint
       if (speaker && this._hass) {
         try {
-          const queueId = attr.active_queue || speaker;
+          const possibleQueueIds = [
+            attr.active_queue,
+            attr.mass_player_id,
+            speaker.replace(/^media_player\./, ""),
+            speaker
+          ].filter(Boolean);
+
           let items = null;
 
           // Method A: mass_queue.send_command bridge
-          try {
-            const cmdRes = await this._hass.callWS({
-              type: "call_service",
-              domain: "mass_queue",
-              service: "send_command",
-              service_data: {
-                command: "player_queues/items",
-                args: { queue_id: queueId, limit: 100 }
-              },
-              return_response: true
-            });
-            const data = cmdRes?.response || cmdRes;
-            if (Array.isArray(data)) items = data;
-            else if (Array.isArray(data?.items)) items = data.items;
-          } catch (_) {}
-
-          // Method B: Direct Ingress or mass_url REST endpoint
-          if (!items && (this._ingressUrl || this._config.mass_url)) {
-            const base = (this._ingressUrl || this._config.mass_url).replace(/\/+$/, "");
+          for (const qId of possibleQueueIds) {
             try {
-              const fetchRes = await fetch(`${base}/api`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  message_id: Date.now(),
+              const cmdRes = await this._hass.callWS({
+                type: "call_service",
+                domain: "mass_queue",
+                service: "send_command",
+                service_data: {
                   command: "player_queues/items",
-                  args: { queue_id: queueId, limit: 100 }
-                })
+                  args: { queue_id: qId, limit: 100 }
+                },
+                return_response: true
               });
-              if (fetchRes.ok) {
-                const json = await fetchRes.json();
-                if (Array.isArray(json)) items = json;
-                else if (Array.isArray(json?.items)) items = json.items;
+              const data = cmdRes?.response || cmdRes;
+              const raw = data?.result || data?.items || (Array.isArray(data) ? data : null);
+              if (Array.isArray(raw) && raw.length > 0) {
+                items = raw;
+                break;
               }
             } catch (_) {}
           }
 
+          // Method B: Direct Ingress or mass_url REST endpoint with token auth support
+          if (!items && (this._ingressUrl || this._config.mass_url)) {
+            const endpoints = [];
+            if (this._ingressUrl) endpoints.push(this._ingressUrl.replace(/\/+$/, ""));
+            if (this._config.mass_url) endpoints.push(this._config.mass_url.trim().replace(/\/+$/, ""));
+
+            for (const base of endpoints) {
+              if (items && items.length > 0) break;
+              const headers = { "Content-Type": "application/json" };
+              if (this._config.mass_token) {
+                headers["Authorization"] = `Bearer ${this._config.mass_token.trim()}`;
+              } else if (this._hass?.auth?.data?.access_token) {
+                headers["Authorization"] = `Bearer ${this._hass.auth.data.access_token}`;
+              }
+
+              for (const qId of possibleQueueIds) {
+                try {
+                  const fetchRes = await fetch(`${base}/api`, {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({
+                      message_id: Date.now(),
+                      command: "player_queues/items",
+                      args: { queue_id: qId, limit: 100 }
+                    })
+                  });
+                  if (fetchRes.ok) {
+                    const json = await fetchRes.json();
+                    const raw = json?.result || json?.response || json?.items || (Array.isArray(json) ? json : null);
+                    if (Array.isArray(raw) && raw.length > 0) {
+                      items = raw;
+                      break;
+                    }
+                  }
+                } catch (_) {}
+              }
+            }
+          }
+
           if (Array.isArray(items) && items.length > 0) {
-            this._queueTracks = items.map((t, idx) => ({
-              name: t.name || t.title || t.media_item?.name || `Track ${idx + 1}`,
-              artist: t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
-              duration: t.duration ? formatDuration(t.duration) : "",
-              queue_item_id: t.queue_item_id || t.item_id || null,
-              media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.name,
-              media_content_type: "track",
-              raw_thumbnail: t.image || t.thumbnail || t.media_item?.image || null,
-              image: this.resolveImageUrl(t.image || t.thumbnail || t.media_item?.image) || null
-            }));
+            this._queueTracks = items.map((t, idx) => {
+              const rawThumb = extractThumb(t);
+              return {
+                name: t.name || t.media_title || t.title || t.media_item?.name || `Track ${idx + 1}`,
+                artist: t.artist || t.media_artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
+                duration: t.duration ? formatDuration(t.duration) : (t.media_duration ? formatDuration(t.media_duration) : ""),
+                queue_item_id: t.queue_item_id || t.item_id || null,
+                media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.name,
+                media_content_type: "track",
+                raw_thumbnail: rawThumb,
+                image: this.resolveImageUrl(rawThumb) || null
+              };
+            });
+            this._queueTotalCount = this._queueTracks.length;
+            window.__mass_player_card_queue = window.__mass_player_card_queue || {};
+            window.__mass_player_card_queue[speaker] = this._queueTracks;
+            try {
+              localStorage.setItem('mass_queue_' + speaker, JSON.stringify(this._queueTracks));
+            } catch (_) {}
             const currentState = this._hass?.states[this._config.speaker_entity];
             this.render(currentState);
             return;
@@ -1077,6 +1182,18 @@ class MassPlayerCard extends HTMLElement {
           const n = (p.name || "").toLowerCase().trim();
           return (n && (album.includes(n) || plAttr.includes(n))) || (currentTitle && n === currentTitle);
         });
+      }
+
+      if (!targetItem) {
+        try {
+          const cachedPlJson = localStorage.getItem('mass_playlist_' + speaker);
+          if (cachedPlJson) {
+            const plObj = JSON.parse(cachedPlJson);
+            if (plObj && plObj.media_id) {
+              targetItem = plObj;
+            }
+          }
+        } catch (_) {}
       }
 
       if (targetItem) {
