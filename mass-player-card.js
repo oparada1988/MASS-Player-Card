@@ -56,34 +56,83 @@ class MassPlayerCardEditor extends HTMLElement {
     this._render();
   }
 
-  _render() {
-    if (!this._hass || !this._config) return;
+  _getSchema() {
+    const style = this._config?.card_style || "unified";
+    const isQueue = style === "queue";
+    const isPlayer = style === "player";
+    const isPlaylist = style === "playlist";
 
-    let form = this.shadowRoot.querySelector("ha-form");
-    if (!form) {
-      this.shadowRoot.innerHTML = `
-        <style>
-          :host {
-            display: block;
+    const schema = [
+      {
+        name: "card_style",
+        selector: {
+          select: {
+            options: [
+              { value: "unified", label: "1. Unified (Player, Queue & Media Grid)" },
+              { value: "player", label: "2. Media Player Only" },
+              { value: "playlist", label: "3. Playlist / Media Grid Only" },
+              { value: "queue", label: "4. Track Queue Only" }
+            ],
+            mode: "dropdown"
           }
-          ha-form {
-            display: block;
-            padding: 8px 0;
+        }
+      },
+      {
+        name: "speaker_entity",
+        required: true,
+        selector: {
+          entity: {
+            domain: "media_player"
           }
-        </style>
-      `;
+        }
+      }
+    ];
 
-      form = document.createElement("ha-form");
-      form.schema = [
-        {
-          name: "speaker_entity",
-          required: true,
-          selector: {
-            entity: {
-              domain: "media_player"
-            }
+    if (style === "unified" || isPlayer || isQueue) {
+      schema.push({
+        name: "queue_limit",
+        selector: {
+          number: {
+            min: 1,
+            max: isQueue ? 10 : 5,
+            step: 1,
+            mode: "slider"
           }
-        },
+        }
+      });
+      schema.push({
+        name: "hide_played_queue",
+        selector: {
+          boolean: {}
+        }
+      });
+    }
+
+    if (style === "unified" || isPlayer) {
+      if (style === "unified") {
+        schema.push({
+          name: "show_player",
+          selector: { boolean: {} }
+        });
+      }
+      schema.push({
+        name: "show_volume",
+        selector: { boolean: {} }
+      });
+      schema.push({
+        name: "show_queue",
+        selector: { boolean: {} }
+      });
+    }
+
+    if (style === "unified" || isPlaylist) {
+      if (style === "unified") {
+        schema.push({
+          name: "show_playlists",
+          selector: { boolean: {} }
+        });
+      }
+      schema.push(
         {
           name: "grid_content",
           selector: {
@@ -119,74 +168,46 @@ class MassPlayerCardEditor extends HTMLElement {
           }
         },
         {
-          name: "show_player",
-          selector: {
-            boolean: {}
-          }
-        },
-        {
-          name: "show_volume",
-          selector: {
-            boolean: {}
-          }
-        },
-        {
-          name: "show_queue",
-          selector: {
-            boolean: {}
-          }
-        },
-        {
-          name: "show_playlists",
-          selector: {
-            boolean: {}
-          }
-        },
-        {
           name: "show_labels",
-          selector: {
-            boolean: {}
-          }
-        },
-        {
-          name: "hide_played_queue",
-          selector: {
-            boolean: {}
-          }
+          selector: { boolean: {} }
         },
         {
           name: "max_height",
-          selector: {
-            text: {}
-          }
-        },
-        {
-          name: "mass_url",
-          selector: {
-            text: {
-              type: "url"
-            }
-          }
+          selector: { text: {} }
         }
-      ];
+      );
+    }
 
-      form.computeLabel = (schema) => {
-        const labels = {
-          speaker_entity: "Media Player Entity",
-          grid_content: "On the grid show",
-          columns: "Grid Columns (default: 3)",
-          limit: "Item Limit (0 = show all)",
-          show_player: "Show Media Player Widget",
-          show_volume: "Show Volume Slider",
-          show_queue: "Auto-Show Track Queue (when playing)",
-          show_playlists: "Show Media Grid",
-          show_labels: "Show Media Labels on Grid",
-          hide_played_queue: "Clear Played Tracks from Queue",
-          max_height: "Grid Max Height (default: 500px)",
-          mass_url: "Music Assistant Server URL (optional, e.g. https://mass.majonomaki.com)"
-        };
-        return labels[schema.name] || schema.name;
-      };
+    schema.push({
+      name: "mass_url",
+      selector: {
+        text: {
+          type: "url"
+        }
+      }
+    });
+
+    return schema;
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+
+    let form = this.shadowRoot.querySelector("ha-form");
+    if (!form) {
+      this.shadowRoot.innerHTML = `
+        <style>
+          :host {
+            display: block;
+          }
+          ha-form {
+            display: block;
+            padding: 8px 0;
+          }
+        </style>
+      `;
+
+      form = document.createElement("ha-form");
 
       form.addEventListener("value-changed", (ev) => {
         ev.stopPropagation();
@@ -201,19 +222,46 @@ class MassPlayerCardEditor extends HTMLElement {
             composed: true
           })
         );
+        this._render();
       });
 
       this.shadowRoot.appendChild(form);
     }
 
+    const isQueue = (this._config?.card_style === "queue");
+    form.schema = this._getSchema();
+    form.computeLabel = (schema) => {
+      const labels = {
+        card_style: "Card Style",
+        speaker_entity: "Media Player Entity",
+        grid_content: "On the grid show",
+        columns: "Grid Columns (default: 3)",
+        limit: "Item Limit (0 = show all)",
+        show_player: "Show Media Player Widget",
+        show_volume: "Show Volume Slider",
+        show_queue: "Auto-Show Track Queue (when playing)",
+        show_playlists: "Show Media Grid",
+        show_labels: "Show Media Labels on Grid",
+        queue_limit: isQueue ? "Queue Track Limit (1 - 10 tracks)" : "Queue Track Limit (1 - 5 tracks)",
+        hide_played_queue: "Clear Played Tracks from Queue",
+        max_height: "Grid Max Height (default: 500px)",
+        mass_url: "Music Assistant Server URL (optional, e.g. https://mass.majonomaki.com)"
+      };
+      return labels[schema.name] || schema.name;
+    };
+
     form.hass = this._hass;
     form.data = {
+      card_style: "unified",
       grid_content: "playlists",
       columns: 3,
       show_player: true,
+      show_volume: true,
       show_queue: true,
       show_playlists: true,
       show_labels: true,
+      hide_played_queue: false,
+      queue_limit: isQueue ? 10 : 5,
       limit: 0,
       max_height: "500px",
       mass_url: "",
@@ -232,6 +280,7 @@ class MassPlayerCard extends HTMLElement {
     this._playlists = [];
     this._allPlaylists = [];
     this._queueTracks = [];
+    this._queueTotalCount = null;
     this._loaded = false;
     this._currentSpeaker = null;
     this._currentGridContent = null;
@@ -256,6 +305,7 @@ class MassPlayerCard extends HTMLElement {
     const mediaPlayers = Object.keys(hass.states).filter(eid => eid.startsWith("media_player."));
     const preferred = mediaPlayers.find(eid => eid.includes("speaker_group") || eid.includes("mass")) || mediaPlayers[0] || "";
     return {
+      card_style: "unified",
       speaker_entity: preferred,
       grid_content: "playlists",
       columns: 3,
@@ -265,6 +315,7 @@ class MassPlayerCard extends HTMLElement {
       show_playlists: true,
       show_labels: true,
       hide_played_queue: false,
+      queue_limit: 5,
       limit: 0
     };
   }
@@ -282,6 +333,7 @@ class MassPlayerCard extends HTMLElement {
 
     const oldMassUrl = this._config?.mass_url;
     this._config = {
+      card_style: "unified",
       grid_content: "playlists",
       columns: 3,
       show_player: true,
@@ -290,6 +342,7 @@ class MassPlayerCard extends HTMLElement {
       show_playlists: true,
       show_labels: true,
       hide_played_queue: false,
+      queue_limit: 5,
       limit: 0,
       mass_url: "",
       ...config,
@@ -300,6 +353,7 @@ class MassPlayerCard extends HTMLElement {
     if (reloadNeeded) {
       this._loaded = false;
       this._queueTracks = [];
+      this._queueTotalCount = null;
       this._allPlaylists = [];
       this._playlists = [];
       if (this._hass) this.loadPlaylists();
@@ -352,6 +406,7 @@ class MassPlayerCard extends HTMLElement {
     if (stateObj?.state === "idle" || stateObj?.state === "off") {
       if (this._queueTracks && this._queueTracks.length > 0) {
         this._queueTracks = [];
+        this._queueTotalCount = null;
         this._lastMediaTitle = null;
       }
     }
@@ -741,6 +796,7 @@ class MassPlayerCard extends HTMLElement {
           raw_thumbnail: t.thumbnail || item.raw_thumbnail || item.image || null,
           image: this.resolveImageUrl(t.thumbnail) || this.resolveImageUrl(item.raw_thumbnail || item.image) || null
         }));
+        this._queueTotalCount = data.children.length;
       } else {
         this._queueTracks = [{
           name: item.name,
@@ -751,6 +807,7 @@ class MassPlayerCard extends HTMLElement {
           raw_thumbnail: item.raw_thumbnail || item.image || null,
           image: this.resolveImageUrl(item.raw_thumbnail || item.image) || null
         }];
+        this._queueTotalCount = 1;
       }
     } catch (e) {
       this._queueTracks = [{
@@ -914,20 +971,48 @@ class MassPlayerCard extends HTMLElement {
 
           const qData = res?.response?.[speaker] || res?.response || res?.[speaker] || res;
           if (qData) {
+            // Store total count if reported by server
+            if (typeof qData.items === 'number') {
+              this._queueTotalCount = qData.items;
+            } else if (typeof qData.item_count === 'number') {
+              this._queueTotalCount = qData.item_count;
+            } else if (typeof qData.total_items === 'number') {
+              this._queueTotalCount = qData.total_items;
+            } else if (Array.isArray(qData?.items)) {
+              this._queueTotalCount = qData.items.length;
+            }
+
+            const extractThumb = (item) => {
+              if (!item) return null;
+              return (
+                item.image ||
+                item.thumbnail ||
+                item.media_image ||
+                item.media_item?.image ||
+                item.media_item?.thumbnail ||
+                item.media_item?.album?.image ||
+                (Array.isArray(item.media_item?.metadata?.images) ? item.media_item.metadata.images[0]?.path : null) ||
+                null
+              );
+            };
+
             const rawItems = Array.isArray(qData)
               ? qData
               : (Array.isArray(qData?.items) ? qData.items : (Array.isArray(qData?.queue_items) ? qData.queue_items : null));
             if (rawItems && rawItems.length > 0) {
-              this._queueTracks = rawItems.map((t, idx) => ({
-                name: t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
-                artist: t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
-                duration: t.duration ? formatDuration(t.duration) : "",
-                queue_item_id: t.queue_item_id || t.item_id || null,
-                media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
-                media_content_type: "track",
-                raw_thumbnail: t.image || t.thumbnail || t.media_item?.image || null,
-                image: this.resolveImageUrl(t.image || t.thumbnail || t.media_item?.image) || null
-              }));
+              this._queueTracks = rawItems.map((t, idx) => {
+                const rawThumb = extractThumb(t);
+                return {
+                  name: t.title || t.name || t.media_item?.name || `Track ${idx + 1}`,
+                  artist: t.artist || t.media_item?.artists?.[0]?.name || t.media_item?.artist || "",
+                  duration: t.duration ? formatDuration(t.duration) : "",
+                  queue_item_id: t.queue_item_id || t.item_id || null,
+                  media_id: t.queue_item_id || t.item_id || t.media_item?.uri || t.title || t.name,
+                  media_content_type: "track",
+                  raw_thumbnail: rawThumb,
+                  image: this.resolveImageUrl(rawThumb) || null
+                };
+              });
               const currentState = this._hass?.states[this._config.speaker_entity];
               this.render(currentState);
               return;
@@ -939,34 +1024,39 @@ class MassPlayerCard extends HTMLElement {
             if (currentItem || nextItem) {
               const partialTracks = [];
               if (currentItem) {
+                const rawThumb = extractThumb(currentItem);
                 partialTracks.push({
-                  name: currentItem.name || currentItem.title || "Current Track",
-                  artist: currentItem.artist || currentItem.media_item?.artists?.[0]?.name || "",
+                  name: currentItem.name || currentItem.title || currentItem.media_item?.name || "Current Track",
+                  artist: currentItem.artist || currentItem.media_item?.artists?.[0]?.name || currentItem.media_item?.artist || "",
                   duration: currentItem.duration ? formatDuration(currentItem.duration) : "",
                   queue_item_id: currentItem.queue_item_id || null,
                   media_id: currentItem.queue_item_id || currentItem.media_item?.uri || currentItem.name,
                   media_content_type: "track",
-                  raw_thumbnail: currentItem.image || null,
-                  image: this.resolveImageUrl(currentItem.image) || null
+                  raw_thumbnail: rawThumb,
+                  image: this.resolveImageUrl(rawThumb) || null
                 });
               }
               if (nextItem) {
+                const rawThumb = extractThumb(nextItem);
                 partialTracks.push({
-                  name: nextItem.name || nextItem.title || "Next Track",
-                  artist: nextItem.artist || nextItem.media_item?.artists?.[0]?.name || "",
+                  name: nextItem.name || nextItem.title || nextItem.media_item?.name || "Next Track",
+                  artist: nextItem.artist || nextItem.media_item?.artists?.[0]?.name || nextItem.media_item?.artist || "",
                   duration: nextItem.duration ? formatDuration(nextItem.duration) : "",
                   queue_item_id: nextItem.queue_item_id || null,
                   media_id: nextItem.queue_item_id || nextItem.media_item?.uri || nextItem.name,
                   media_content_type: "track",
-                  raw_thumbnail: nextItem.image || null,
-                  image: this.resolveImageUrl(nextItem.image) || null
+                  raw_thumbnail: rawThumb,
+                  image: this.resolveImageUrl(rawThumb) || null
                 });
               }
               if (partialTracks.length > 0) {
-                this._queueTracks = partialTracks;
+                // If we do not already have a richer queue list, populate with partialTracks
+                if (!this._queueTracks || this._queueTracks.length <= partialTracks.length) {
+                  this._queueTracks = partialTracks;
+                }
                 const currentState = this._hass?.states[this._config.speaker_entity];
                 this.render(currentState);
-                return;
+                // Do NOT early return here; allow Method 4 to attempt matching full playlist below!
               }
             }
           }
@@ -1060,13 +1150,39 @@ class MassPlayerCard extends HTMLElement {
     const allItems = (this._allPlaylists && this._allPlaylists.length > 0) ? this._allPlaylists : (this._playlists || []);
     const playlists = (limit > 0) ? allItems.slice(0, limit) : allItems;
 
-    const showPlayer = this._config.show_player !== false;
-    const showVolume = this._config.show_volume !== false;
-    const showQueue = this._config.show_queue !== false;
-    const showPlaylists = this._config.show_playlists !== false;
+    const cardStyle = this._config.card_style || "unified";
+    const isQueueStyle = cardStyle === "queue";
+    const isPlayerStyle = cardStyle === "player";
+    const isPlaylistStyle = cardStyle === "playlist";
+
+    let showPlayer = this._config.show_player !== false;
+    let showVolume = this._config.show_volume !== false;
+    let showQueue = this._config.show_queue !== false;
+    let showPlaylists = this._config.show_playlists !== false;
+
+    if (isPlayerStyle) {
+      showPlayer = true;
+      showPlaylists = false;
+      showQueue = this._config.show_queue !== false;
+    } else if (isPlaylistStyle) {
+      showPlayer = false;
+      showPlaylists = true;
+      showQueue = false;
+    } else if (isQueueStyle) {
+      showPlayer = false;
+      showPlaylists = false;
+      showQueue = true;
+    }
+
     const showLabels = this._config.show_labels !== false;
     const cols = Number(this._config.columns) || 3;
     const maxHeight = this._config.max_height || '500px';
+
+    // Queue limit calculation (unified & player: 1-5, queue: 1-10)
+    const maxAllowed = isQueueStyle ? 10 : 5;
+    const defaultLimit = isQueueStyle ? 10 : 5;
+    let rawQueueLimit = Number(this._config.queue_limit);
+    const queueLimit = (isNaN(rawQueueLimit) || rawQueueLimit <= 0) ? defaultLimit : Math.min(maxAllowed, Math.max(1, rawQueueLimit));
 
     // Volume details
     const vol = typeof attr.volume_level === 'number' ? attr.volume_level : 0.5;
@@ -1112,6 +1228,10 @@ class MassPlayerCard extends HTMLElement {
       }));
     }
 
+    const totalInQueue = this._queueTotalCount || rawQueue.length;
+    const remainingInQueue = queueTracks.length;
+    const visibleTracks = queueTracks.slice(0, queueLimit);
+
     // Auto-open on transition from stopped/idle to playing
     if (this._lastPlayState !== undefined && !this._lastPlayState && isPlaying) {
       this._userQueueToggle = true;
@@ -1119,11 +1239,30 @@ class MassPlayerCard extends HTMLElement {
     this._lastPlayState = isPlaying;
 
     let isQueueOpen = false;
-    if (showQueue) {
+    if (isQueueStyle) {
+      isQueueOpen = true;
+    } else if (showQueue) {
       if (this._userQueueToggle !== null) {
         isQueueOpen = this._userQueueToggle && isPlaying;
       } else {
         isQueueOpen = isPlaying && queueTracks.length > 0;
+      }
+    }
+
+    let queueCountLabel = `${visibleTracks.length} tracks`;
+    if (visibleTracks.length === 0) {
+      queueCountLabel = '0 tracks';
+    } else if (hidePlayed && currentTrackIdx >= 0) {
+      if (remainingInQueue > visibleTracks.length) {
+        queueCountLabel = `${visibleTracks.length} of ${remainingInQueue} remaining • ${totalInQueue} total`;
+      } else {
+        queueCountLabel = `${remainingInQueue} remaining • ${totalInQueue} total`;
+      }
+    } else {
+      if (queueTracks.length > visibleTracks.length) {
+        queueCountLabel = `${visibleTracks.length} of ${queueTracks.length} tracks`;
+      } else {
+        queueCountLabel = `${queueTracks.length} tracks`;
       }
     }
 
@@ -1380,6 +1519,35 @@ class MassPlayerCard extends HTMLElement {
           opacity: 1;
           margin-top: 12px;
           margin-bottom: 4px;
+        }
+        .queue-drawer.queue-standalone {
+          max-height: none !important;
+          opacity: 1 !important;
+          margin-top: 0 !important;
+          margin-bottom: 0 !important;
+        }
+        .queue-drawer.queue-standalone .queue-list {
+          max-height: 480px;
+        }
+        .queue-empty-state {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 32px 16px;
+          text-align: center;
+          color: var(--secondary-text-color, #a0a0a0);
+          gap: 10px;
+        }
+        .queue-empty-state svg {
+          width: 38px;
+          height: 38px;
+          fill: var(--secondary-text-color, #707070);
+          opacity: 0.6;
+        }
+        .queue-empty-state span {
+          font-size: 13px;
+          font-weight: 500;
         }
         .queue-header {
           display: flex;
@@ -1851,33 +2019,40 @@ class MassPlayerCard extends HTMLElement {
           </div>
         </div>
 
-        <!-- MIDDLE: Track Queue Drawer (Smooth Accordion Effect) -->
-        <div class="queue-drawer ${isQueueOpen ? 'queue-open' : 'queue-closed'}">
+        <!-- MIDDLE: Track Queue Drawer / Standalone View -->
+        <div class="queue-drawer ${isQueueOpen ? 'queue-open' : 'queue-closed'} ${isQueueStyle ? 'queue-standalone' : ''}" style="${(showQueue || isQueueStyle) ? '' : 'display:none;'}">
           <div class="queue-header">
             <span class="queue-title">UPCOMING QUEUE</span>
-            <span class="queue-count">${hidePlayed && currentTrackIdx >= 0 ? `${queueTracks.length} remaining • ${rawQueue.length} total` : `${queueTracks.length} tracks`}</span>
+            <span class="queue-count">${queueCountLabel}</span>
           </div>
-          <div class="queue-list">
-            ${queueTracks.map((t, idx) => {
-              const isCurrent = t.is_playing;
-              return `
-                <div class="queue-item ${isCurrent ? 'active-track' : ''}" data-track-idx="${idx}" title="Play ${t.name}">
-                  <div class="queue-item-left">
-                    <span class="queue-idx">${t.is_playing ? `<span class="playing-equalizer"><span></span><span></span><span></span></span>` : t.original_idx}</span>
-                    <div class="queue-thumb">
-                      ${t.image ? `<img class="queue-thumb-img" src="${t.image}" alt="" loading="lazy" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
-                      <svg viewBox="0 0 24 24" style="${t.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+          ${visibleTracks.length === 0 ? `
+            <div class="queue-empty-state">
+              <svg viewBox="0 0 24 24"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>
+              <span>Queue is idle. Start playback to view upcoming tracks.</span>
+            </div>
+          ` : `
+            <div class="queue-list">
+              ${visibleTracks.map((t, idx) => {
+                const isCurrent = t.is_playing;
+                return `
+                  <div class="queue-item ${isCurrent ? 'active-track' : ''}" data-track-idx="${idx}" title="Play ${t.name}">
+                    <div class="queue-item-left">
+                      <span class="queue-idx">${t.is_playing ? `<span class="playing-equalizer"><span></span><span></span><span></span></span>` : t.original_idx}</span>
+                      <div class="queue-thumb">
+                        ${t.image ? `<img class="queue-thumb-img" src="${t.image}" alt="" loading="lazy" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
+                        <svg viewBox="0 0 24 24" style="${t.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                      </div>
+                      <div class="queue-track-meta">
+                        <span class="queue-track-name">${t.name}</span>
+                        ${t.artist ? `<span class="queue-track-artist">${t.artist}</span>` : ''}
+                      </div>
                     </div>
-                    <div class="queue-track-meta">
-                      <span class="queue-track-name">${t.name}</span>
-                      ${t.artist ? `<span class="queue-track-artist">${t.artist}</span>` : ''}
-                    </div>
+                    ${t.duration ? `<span class="queue-duration">${t.duration}</span>` : ''}
                   </div>
-                  ${t.duration ? `<span class="queue-duration">${t.duration}</span>` : ''}
-                </div>
-              `;
-            }).join('')}
-          </div>
+                `;
+              }).join('')}
+            </div>
+          `}
         </div>
 
         <!-- SUBTLE SEPARATOR LINE -->
@@ -1986,7 +2161,7 @@ class MassPlayerCard extends HTMLElement {
     this.shadowRoot.querySelectorAll('.queue-item').forEach(itemEl => {
       itemEl.onclick = () => {
         const trackIdx = parseInt(itemEl.getAttribute('data-track-idx'), 10);
-        const track = queueTracks[trackIdx];
+        const track = visibleTracks[trackIdx];
         if (track) {
           this.playTrack(track);
         }

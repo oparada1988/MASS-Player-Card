@@ -48,12 +48,14 @@ A sleek, modern, all-in-one Lovelace card for **Home Assistant** and **Music Ass
 
 ```yaml
 type: custom:mass-player-card
+card_style: unified       # Options: unified, player, playlist, queue
 speaker_entity: media_player.home_speaker_group
+queue_limit: 5            # 1 to 5 for unified/player; 1 to 10 for track queue
 grid_content: playlists  # Options: playlists or favorites
 columns: 3
 limit: 12
 show_player: true
-show_queue: true         # Auto-shows 5-track scrollable queue drawer during playback
+show_queue: true         # Auto-shows scrollable queue drawer during playback
 show_playlists: true
 show_labels: false       # Set false to show pure edge-to-edge album art without text overlay
 ```
@@ -63,16 +65,19 @@ show_labels: false       # Set false to show pure edge-to-edge album art without
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `speaker_entity` | `string` | **Required** | The entity ID of the target speaker or speaker group (e.g., `media_player.home_speaker_group`). |
+| `card_style` | `string` | `unified` | Select from 4 card styles: `unified` (Player + Queue + Grid), `player` (Standalone Player), `playlist` (Standalone Media Grid), or `queue` (Standalone Track Queue). |
+| `queue_limit` | `number` | `5` (`10` for queue) | Number of tracks displayed in the queue list (1–5 for unified/player; 1–10 for dedicated track queue card). |
 | `grid_content` | `string` | `playlists` | Single-choice selection: `playlists` or `favorites`. Determines what is automatically displayed on the grid. |
 | `columns` | `number` | `3` | Number of columns in the media grid (1 to 6). |
 | `limit` | `number` | `0` (all) | Maximum number of items to display. Set to `0` or omit to display all. |
 | `show_player` | `boolean` | `true` | Toggle the media player header on or off. |
 | `show_volume` | `boolean` | `true` | Toggle the interactive volume slider and mute control on or off. |
-| `show_queue` | `boolean` | `true` | Automatically slides open the upcoming track queue drawer during playback (shows up to 5 tracks with scrollbar; completely hidden when idle). |
+| `show_queue` | `boolean` | `true` | Automatically slides open the upcoming track queue drawer during playback (completely hidden when idle). |
 | `show_playlists` | `boolean` | `true` | Toggle the media grid section on or off. |
 | `show_labels` | `boolean` | `true` | Toggle the text and gradient overlay on grid tiles. Turn off for clean, pure album artwork! |
 | `hide_played_queue` | `boolean` | `true` | Automatically clears already-played tracks from the Upcoming Queue and auto-scrolls to the active song. |
-| `max_height` | `string` | `380px` | Maximum height of the scrollable grid (e.g. `none`, `450px`, `380px`). |
+| `max_height` | `string` | `500px` | Maximum height of the scrollable grid (e.g. `none`, `500px`, `380px`). |
+| `mass_url` | `string` | `""` | Optional Music Assistant Server URL override (e.g. `https://mass.domain.com`). |
 | `playlists` | `list` | `auto` | *(Optional)* Manually specify custom items if you wish to override auto-discovery. |
 
 ---
