@@ -252,7 +252,7 @@ class MassPlayerCardEditor extends HTMLElement {
         show_queue: "Auto-Show Track Queue (when playing)",
         show_playlists: "Show Media Grid",
         show_labels: "Show Media Labels on Grid",
-        queue_limit: isQueue ? "Queue Track Limit (1 - 10 tracks)" : "Queue Track Limit (1 - 5 tracks)",
+        queue_limit: isQueue ? "Queue Visible Rows (1 - 10 rows)" : "Queue Visible Rows (1 - 5 rows)",
         hide_played_queue: "Clear Played Tracks from Queue",
         max_height: "Grid Max Height (default: 500px)",
         mass_url: "Music Assistant Server URL (optional, e.g. https://mass.majonomaki.com)",
@@ -421,6 +421,7 @@ class MassPlayerCard extends HTMLElement {
         this._queueTracks = [];
         this._queueTotalCount = null;
         this._lastMediaTitle = null;
+        this._lastFailedSyncTitle = null;
       }
     }
 
@@ -428,16 +429,19 @@ class MassPlayerCard extends HTMLElement {
     if (isPlaying && !this._fetchingQueue) {
       if (!this._queueTracks || this._queueTracks.length === 0) {
         this._autoLoadCurrentQueue(stateObj);
-      } else if (currentTitle && currentTitle !== this._lastMediaTitle) {
-        // Track changed - check if new title exists in existing queue
+      } else if (currentTitle) {
+        // Track validation: check if currently playing title exists in active queue
         const curTitleNorm = currentTitle.toLowerCase().trim();
         const found = this._queueTracks.some(t => {
           const tName = (t.name || "").toLowerCase().trim();
           return tName && (curTitleNorm === tName || curTitleNorm.includes(tName) || tName.includes(curTitleNorm));
         });
-        if (!found) {
-          // Playing something not in our current queue, re-sync from server
+        if (!found && this._lastFailedSyncTitle !== currentTitle) {
+          // Playing something not in our current queue, re-sync from server across devices
+          this._lastFailedSyncTitle = currentTitle;
           this._autoLoadCurrentQueue(stateObj, true);
+        } else if (found) {
+          this._lastFailedSyncTitle = null;
         }
       }
     }
@@ -799,16 +803,30 @@ class MassPlayerCard extends HTMLElement {
         media_content_type: item.media_content_type || "playlist"
       });
 
+      const isAlbum = item.media_content_type === "album" || item.media_class === "album";
+      const playlistThumb = item.raw_thumbnail || item.image || null;
+
       if (data && data.children && data.children.length > 0) {
-        this._queueTracks = data.children.map(t => ({
-          name: t.title,
-          artist: t.media_artist || "",
-          duration: t.duration ? formatDuration(t.duration) : "",
-          media_id: t.media_content_id || t.title,
-          media_content_type: t.media_content_type || "track",
-          raw_thumbnail: t.thumbnail || item.raw_thumbnail || item.image || null,
-          image: this.resolveImageUrl(t.thumbnail) || this.resolveImageUrl(item.raw_thumbnail || item.image) || null
-        }));
+        this._queueTracks = data.children.map(t => {
+          // For albums, all tracks legitimately share the album art.
+          // For playlists, avoid stamping the playlist cover onto individual tracks.
+          let rawThumb = t.thumbnail || t.image || t.media_image || null;
+          if (!rawThumb && isAlbum) {
+            rawThumb = playlistThumb;
+          }
+          if (!isAlbum && rawThumb && (rawThumb === playlistThumb || rawThumb === item.thumbnail)) {
+            rawThumb = null;
+          }
+          return {
+            name: t.title,
+            artist: t.media_artist || "",
+            duration: t.duration ? formatDuration(t.duration) : "",
+            media_id: t.media_content_id || t.title,
+            media_content_type: t.media_content_type || "track",
+            raw_thumbnail: rawThumb,
+            image: rawThumb ? this.resolveImageUrl(rawThumb) : null
+          };
+        });
         this._queueTotalCount = data.children.length;
         window.__mass_player_card_queue = window.__mass_player_card_queue || {};
         window.__mass_player_card_queue[speaker] = this._queueTracks;
@@ -862,22 +880,31 @@ class MassPlayerCard extends HTMLElement {
     const extractThumb = (item) => {
       if (!item) return null;
       return (
-        item.image ||
+        item.media_item?.album?.image ||
+        (Array.isArray(item.media_item?.metadata?.images) ? (item.media_item.metadata.images.find(img => img.type === "thumb" || img.type === "album")?.path || item.media_item.metadata.images[0]?.path) : null) ||
         item.thumbnail ||
+        item.image ||
         item.media_image ||
         item.media_item?.image ||
         item.media_item?.thumbnail ||
-        item.media_item?.album?.image ||
-        (Array.isArray(item.media_item?.metadata?.images) ? item.media_item.metadata.images[0]?.path : null) ||
         null
       );
     };
 
     try {
-      // 0. Shared memory and localStorage queue cache across card instances
-      if ((!this._queueTracks || this._queueTracks.length <= 2) && speaker) {
+      // 0. Shared memory and localStorage queue cache across card instances (strictly validate against active track)
+      if (!force && (!this._queueTracks || this._queueTracks.length <= 2) && speaker) {
+        const curTitle = (attr.media_title || "").toLowerCase().trim();
+        const matchesCurrentTrack = (trackList) => {
+          if (!curTitle || !Array.isArray(trackList) || trackList.length === 0) return false;
+          return trackList.some(t => {
+            const tName = (t.name || "").toLowerCase().trim();
+            return tName && (curTitle === tName || curTitle.includes(tName) || tName.includes(curTitle));
+          });
+        };
+
         const sharedQueue = window.__mass_player_card_queue?.[speaker] || null;
-        if (sharedQueue && Array.isArray(sharedQueue) && sharedQueue.length > 2) {
+        if (sharedQueue && Array.isArray(sharedQueue) && sharedQueue.length > 2 && matchesCurrentTrack(sharedQueue)) {
           this._queueTracks = sharedQueue;
           this._queueTotalCount = sharedQueue.length;
           const currentState = this._hass?.states[this._config.speaker_entity];
@@ -888,7 +915,7 @@ class MassPlayerCard extends HTMLElement {
           const cachedJson = localStorage.getItem('mass_queue_' + speaker);
           if (cachedJson) {
             const parsed = JSON.parse(cachedJson);
-            if (Array.isArray(parsed) && parsed.length > 2) {
+            if (Array.isArray(parsed) && parsed.length > 2 && matchesCurrentTrack(parsed)) {
               this._queueTracks = parsed;
               this._queueTotalCount = parsed.length;
               const currentState = this._hass?.states[this._config.speaker_entity];
@@ -1174,23 +1201,55 @@ class MassPlayerCard extends HTMLElement {
       const album = (attr.media_album_name || "").toLowerCase().trim();
       const plAttr = (attr.media_playlist || "").toLowerCase().trim();
       const currentTitle = (attr.media_title || "").toLowerCase().trim();
+      const currentArtist = (attr.media_artist || "").toLowerCase().trim();
 
       const candidateLists = (this._allPlaylists && this._allPlaylists.length > 0) ? this._allPlaylists : this._playlists;
       let targetItem = null;
       if (candidateLists && candidateLists.length > 0) {
+        // Priority A: match by album or playlist name attribute
         targetItem = candidateLists.find(p => {
           const n = (p.name || "").toLowerCase().trim();
-          return (n && (album.includes(n) || plAttr.includes(n))) || (currentTitle && n === currentTitle);
+          if (!n) return false;
+          return (
+            (album && (album === n || album.includes(n) || n.includes(album))) ||
+            (plAttr && (plAttr === n || plAttr.includes(n) || n.includes(plAttr)))
+          );
         });
+
+        // Priority B: match by current track title
+        if (!targetItem && currentTitle) {
+          targetItem = candidateLists.find(p => {
+            const n = (p.name || "").toLowerCase().trim();
+            return n && (n === currentTitle || n.includes(currentTitle) || currentTitle.includes(n));
+          });
+        }
+
+        // Priority C: match by artist name (e.g. "Brothertiger" in "This is Brothertiger" or "Brothertiger Radio")
+        if (!targetItem && currentArtist) {
+          targetItem = candidateLists.find(p => {
+            const n = (p.name || "").toLowerCase().trim();
+            return n && (n.includes(currentArtist) || currentArtist.includes(n));
+          });
+        }
       }
 
-      if (!targetItem) {
+      // Check cached playlist ONLY if it strictly relates to the current active media
+      if (!targetItem && !force) {
         try {
           const cachedPlJson = localStorage.getItem('mass_playlist_' + speaker);
           if (cachedPlJson) {
             const plObj = JSON.parse(cachedPlJson);
-            if (plObj && plObj.media_id) {
-              targetItem = plObj;
+            if (plObj && plObj.name) {
+              const plName = plObj.name.toLowerCase().trim();
+              const isRelevant = (
+                (album && (album.includes(plName) || plName.includes(album))) ||
+                (plAttr && (plAttr.includes(plName) || plName.includes(plAttr))) ||
+                (currentArtist && (plName.includes(currentArtist) || currentArtist.includes(plName))) ||
+                (currentTitle && (plName.includes(currentTitle) || currentTitle.includes(plName)))
+              );
+              if (isRelevant && plObj.media_id) {
+                targetItem = plObj;
+              }
             }
           }
         } catch (_) {}
@@ -1218,7 +1277,13 @@ class MassPlayerCard extends HTMLElement {
             if (plData && plData.children && plData.children.length > 0) {
               const match = plData.children.find(p => {
                 const n = (p.title || "").toLowerCase().trim();
-                return n && (album.includes(n) || plAttr.includes(n));
+                if (!n) return false;
+                return (
+                  (album && (album.includes(n) || n.includes(album))) ||
+                  (plAttr && (plAttr.includes(n) || n.includes(plAttr))) ||
+                  (currentArtist && (n.includes(currentArtist) || currentArtist.includes(n))) ||
+                  (currentTitle && (n.includes(currentTitle) || currentTitle.includes(n)))
+                );
               });
               if (match) {
                 await this.loadQueueForPlaylist({
@@ -1347,7 +1412,7 @@ class MassPlayerCard extends HTMLElement {
 
     const totalInQueue = this._queueTotalCount || rawQueue.length;
     const remainingInQueue = queueTracks.length;
-    const visibleTracks = queueTracks.slice(0, queueLimit);
+    const queueListMaxHeight = isQueueStyle ? 480 : Math.round(queueLimit * 35.5);
 
     // Auto-open on transition from stopped/idle to playing
     if (this._lastPlayState !== undefined && !this._lastPlayState && isPlaying) {
@@ -1366,21 +1431,17 @@ class MassPlayerCard extends HTMLElement {
       }
     }
 
-    let queueCountLabel = `${visibleTracks.length} tracks`;
-    if (visibleTracks.length === 0) {
+    let queueCountLabel = `${remainingInQueue} tracks`;
+    if (remainingInQueue === 0) {
       queueCountLabel = '0 tracks';
     } else if (hidePlayed && currentTrackIdx >= 0) {
-      if (remainingInQueue > visibleTracks.length) {
-        queueCountLabel = `${visibleTracks.length} of ${remainingInQueue} remaining • ${totalInQueue} total`;
-      } else {
+      if (totalInQueue > remainingInQueue) {
         queueCountLabel = `${remainingInQueue} remaining • ${totalInQueue} total`;
+      } else {
+        queueCountLabel = `${remainingInQueue} tracks`;
       }
     } else {
-      if (queueTracks.length > visibleTracks.length) {
-        queueCountLabel = `${visibleTracks.length} of ${queueTracks.length} tracks`;
-      } else {
-        queueCountLabel = `${queueTracks.length} tracks`;
-      }
+      queueCountLabel = `${remainingInQueue} tracks`;
     }
 
     this.shadowRoot.innerHTML = `
@@ -2142,22 +2203,23 @@ class MassPlayerCard extends HTMLElement {
             <span class="queue-title">UPCOMING QUEUE</span>
             <span class="queue-count">${queueCountLabel}</span>
           </div>
-          ${visibleTracks.length === 0 ? `
+          ${queueTracks.length === 0 ? `
             <div class="queue-empty-state">
               <svg viewBox="0 0 24 24"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>
               <span>Queue is idle. Start playback to view upcoming tracks.</span>
             </div>
           ` : `
-            <div class="queue-list">
-              ${visibleTracks.map((t, idx) => {
+            <div class="queue-list" style="max-height: ${queueListMaxHeight}px;">
+              ${queueTracks.map((t, idx) => {
                 const isCurrent = t.is_playing;
+                const thumbImg = isCurrent ? (picture || t.image) : t.image;
                 return `
                   <div class="queue-item ${isCurrent ? 'active-track' : ''}" data-track-idx="${idx}" title="Play ${t.name}">
                     <div class="queue-item-left">
                       <span class="queue-idx">${t.is_playing ? `<span class="playing-equalizer"><span></span><span></span><span></span></span>` : t.original_idx}</span>
                       <div class="queue-thumb">
-                        ${t.image ? `<img class="queue-thumb-img" src="${t.image}" alt="" loading="lazy" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
-                        <svg viewBox="0 0 24 24" style="${t.image ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                        ${thumbImg ? `<img class="queue-thumb-img" src="${thumbImg}" alt="" loading="lazy" onerror="this.style.display='none'; const s = this.nextElementSibling; if (s) s.style.display='block';" />` : ''}
+                        <svg viewBox="0 0 24 24" style="${thumbImg ? 'display:none;' : ''}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
                       </div>
                       <div class="queue-track-meta">
                         <span class="queue-track-name">${t.name}</span>
@@ -2278,7 +2340,7 @@ class MassPlayerCard extends HTMLElement {
     this.shadowRoot.querySelectorAll('.queue-item').forEach(itemEl => {
       itemEl.onclick = () => {
         const trackIdx = parseInt(itemEl.getAttribute('data-track-idx'), 10);
-        const track = visibleTracks[trackIdx];
+        const track = queueTracks[trackIdx];
         if (track) {
           this.playTrack(track);
         }
